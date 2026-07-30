@@ -1,78 +1,304 @@
-import Image from "next/image";
-import { Geist, Geist_Mono } from "next/font/google";
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/router";
+import { Button, Card, ErrorNote, Layout } from "@/components/Layout";
+import { FlowStepList } from "@/components/FlowStepList";
+import { post } from "@/lib/client";
+import {
+  exportSteps,
+  type AgentMessage,
+  type FlowStep,
+  type HubMessage,
+} from "@/types/flow";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
+type Phase = "form" | "waiting" | "recording" | "stopped";
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+function defaultTitle(): string {
+  const now = new Date();
+  return `Recording ${now.toLocaleDateString()} at ${now.toLocaleTimeString()}`;
+}
 
-export default function Home() {
+function sendHub(message: HubMessage): void {
+  window.postMessage(message, window.location.origin);
+}
+
+export default function RecordPage() {
+  const router = useRouter();
+  const [url, setUrl] = useState("");
+  const [phase, setPhase] = useState<Phase>("form");
+  const [steps, setSteps] = useState<FlowStep[]>([]);
+  const [title, setTitle] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [extensionReady, setExtensionReady] = useState<boolean | null>(null);
+  const bottom = useRef<HTMLDivElement>(null);
+
+  // The whole conversation with the extension happens on this listener. The bridge
+  // content script (extension) relays between here and the service worker.
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window) return;
+      const data = event.data as AgentMessage | undefined;
+      if (!data || data.source !== "tf-agent") return;
+
+      switch (data.kind) {
+        case "bridge-ready":
+          setExtensionReady(true);
+          break;
+        case "snapshot":
+          // Full state from the SW — also how a dashboard reload rejoins a
+          // recording already in progress.
+          setExtensionReady(true);
+          if (data.recording || data.steps.length > 0) {
+            setSteps(data.steps);
+            setPhase((current) =>
+              data.recording
+                ? "recording"
+                : current === "recording" || current === "waiting"
+                  ? "stopped"
+                  : current,
+            );
+            setTitle((current) => current || defaultTitle());
+          }
+          break;
+        case "step":
+          setSteps((previous) => [...previous, data.step]);
+          break;
+        case "stopped":
+          setPhase((current) =>
+            current === "recording" || current === "waiting" ? "stopped" : current,
+          );
+          break;
+        default:
+          break;
+      }
+    };
+
+    window.addEventListener("message", onMessage);
+    // The bridge announces on load; ping covers the case where it loaded first.
+    sendHub({ source: "tf-hub", kind: "ping" });
+    const probe = setTimeout(() => {
+      setExtensionReady((current) => (current === null ? false : current));
+    }, 1200);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      clearTimeout(probe);
+    };
+  }, []);
+
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ behavior: "smooth" });
+  }, [steps.length]);
+
+  const start = (event: React.FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    const target = url.trim();
+    if (!/^https?:\/\//i.test(target)) {
+      setError("Enter a full http(s) URL, e.g. https://example.com");
+      return;
+    }
+    setSteps([]);
+    setTitle(defaultTitle());
+    setPhase("waiting");
+    // The EXTENSION opens the tab and starts recording — no popup blockers, no
+    // opener dependency, survives every navigation.
+    sendHub({ source: "tf-hub", kind: "openAndRecord", url: target });
+  };
+
+  const stop = () => sendHub({ source: "tf-hub", kind: "stop" });
+
+  const discard = () => {
+    setSteps([]);
+    setPhase("form");
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const data = await post<{ flowId: string }>("/api/flows", {
+        title: title.trim() || defaultTitle(),
+        sourceUrl: url.trim() || undefined,
+        timeout: 5000, // native flow-level wait budget (selectors, redirects, loads)
+        steps,
+      });
+      await router.push(`/flows/${data.flowId}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setSaving(false);
+    }
+  };
+
+  const download = () => {
+    // Timestamps stay in saved flows (they drive "as recorded" replay speed) but are
+    // stripped from downloads so the JSON is byte-compatible with DevTools.
+    const json = JSON.stringify(
+      {
+        title: title.trim() || defaultTitle(),
+        timeout: 5000,
+        steps: exportSteps(steps),
+      },
+      null,
+      4,
+    );
+    const blob = new Blob([json], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `${(title || "recording").replace(/[^\w-]+/g, "-")}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
+  const interactionCount = steps.filter(
+    (step) => step.type !== "setViewport" && step.type !== "navigate",
+  ).length;
+
   return (
-    <div
-      className={`${geistSans.className} ${geistMono.className} flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black`}
-    >
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the index.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <Layout>
+      <h1 className="text-2xl font-semibold tracking-tight">Record a flow</h1>
+      <p className="mt-1 text-sm text-zinc-500">
+        The extension opens the site in a new tab and records every interaction —
+        any site, across navigations. Nothing is stored until you save.
+      </p>
+
+      <ErrorNote message={error} />
+
+      {extensionReady === false && (
+        <Card className="mt-6 border-amber-300 p-5 text-sm dark:border-amber-900/60">
+          <h2 className="font-semibold text-amber-700 dark:text-amber-300">
+            Extension not detected
+          </h2>
+          <ol className="mt-2 list-decimal space-y-1 pl-5 text-zinc-600 dark:text-zinc-400">
+            <li>
+              Build it once: <code className="font-mono">npm run build:ext</code>
+            </li>
+            <li>
+              Open <code className="font-mono">chrome://extensions</code>, enable
+              Developer mode
+            </li>
+            <li>
+              <b>Load unpacked</b> → select{" "}
+              <code className="font-mono">extension/dist</code>
+            </li>
+            <li>Reload this page</li>
+          </ol>
+        </Card>
+      )}
+
+      {phase === "form" && (
+        <Card className="mt-6 p-6">
+          <form onSubmit={start} className="flex flex-col gap-4">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">Website URL</span>
+              <input
+                value={url}
+                onChange={(event) => setUrl(event.target.value)}
+                placeholder="https://example.com"
+                required
+                className="rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-sm outline-none focus:border-zinc-900 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:border-zinc-300"
+              />
+            </label>
+            <div className="flex items-center gap-3">
+              <Button type="submit" disabled={extensionReady !== true}>
+                Start Session
+              </Button>
+              <button
+                type="button"
+                onClick={() =>
+                  setUrl(`${window.location.origin}/demo.html`)
+                }
+                className="text-xs text-zinc-500 underline-offset-2 hover:underline"
+              >
+                try the demo page
+              </button>
+              <span className="text-xs text-zinc-500">
+                You can also hit ⏺ Record in the extension popup on any tab.
+              </span>
+            </div>
+          </form>
+        </Card>
+      )}
+
+      {phase !== "form" && (
+        <>
+          <div className="mt-6 flex flex-wrap items-center gap-3">
+            {phase === "waiting" && (
+              <span className="flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+                Opening the tab…
+              </span>
+            )}
+            {phase === "recording" && (
+              <span className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+                Recording — interact with the tab
+              </span>
+            )}
+            {phase === "stopped" && (
+              <span className="text-sm font-medium text-zinc-500">■ Stopped</span>
+            )}
+            <span
+              data-testid="tf-step-count"
+              className="rounded-full bg-zinc-100 px-2.5 py-1 font-mono text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs/pages/getting-started?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+              {steps.length} steps
+            </span>
+            <span className="flex-1" />
+            {phase !== "stopped" && (
+              <Button variant="danger" onClick={stop}>
+                Stop recording
+              </Button>
+            )}
+          </div>
+
+          {phase === "stopped" && (
+            <Card className="mt-4 p-5">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                <label className="flex flex-1 flex-col gap-1.5">
+                  <span className="text-sm font-medium">Flow name</span>
+                  <input
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                    className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-900 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:border-zinc-300"
+                  />
+                </label>
+                <div className="flex gap-2">
+                  <Button onClick={save} disabled={saving || interactionCount === 0}>
+                    {saving ? "Saving…" : "Save flow"}
+                  </Button>
+                  <Button variant="secondary" onClick={download}>
+                    Download JSON
+                  </Button>
+                  <Button variant="secondary" onClick={discard}>
+                    Discard
+                  </Button>
+                </div>
+              </div>
+              {interactionCount === 0 && (
+                <p className="mt-3 text-xs text-zinc-500">
+                  No interactions were recorded — nothing worth saving yet.
+                </p>
+              )}
+            </Card>
+          )}
+
+          <Card className="mt-4 overflow-hidden">
+            <div className="border-b border-zinc-100 px-5 py-3 dark:border-zinc-800">
+              <h2 className="text-sm font-semibold">Steps</h2>
+            </div>
+            {steps.length === 0 ? (
+              <p className="px-6 py-12 text-center text-sm text-zinc-500">
+                Nothing yet — interact with the opened tab.
+              </p>
+            ) : (
+              <div className="max-h-128 overflow-y-auto">
+                <FlowStepList steps={steps} />
+                <div ref={bottom} />
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+    </Layout>
   );
 }

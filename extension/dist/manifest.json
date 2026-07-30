@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "TestFlow Recorder",
+  "version": "0.1.0",
+  "description": "Records browser interactions as Chrome DevTools Recorder flows and streams them to the TestFlow dashboard.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "sw.js" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "TestFlow Recorder"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["recorder.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["main-world.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["http://localhost:3000/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

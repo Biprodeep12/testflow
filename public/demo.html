@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TF Demo Shop</title>
+  <!-- No snippet needed anymore: the TestFlow extension injects its recorder
+       into every page automatically. -->
+  <style>
+    body { font: 15px/1.6 system-ui, sans-serif; max-width: 560px; margin: 3rem auto; padding: 0 1rem; }
+    button, input, select { font: inherit; padding: .45rem .8rem; margin: .25rem 0; }
+    #msg { color: #059669; font-weight: 600; min-height: 1.5em; }
+  </style>
+</head>
+<body>
+  <h1>Demo shop</h1>
+  <p>A tiny page for trying the recorder without touching a real site.</p>
+
+  <button id="cta" data-testid="add-to-cart"
+    onclick="document.getElementById('msg').textContent='Added to cart!'">
+    Add to cart
+  </button>
+  <button aria-label="Increase guests" onclick="
+    var n = document.getElementById('guests');
+    n.textContent = String(Number(n.textContent) + 1)">+</button>
+  <span>guests: <b id="guests">0</b></span>
+
+  <p>
+    <label>Email <input id="email" type="email" placeholder="you@example.com" /></label>
+  </p>
+  <p>
+    <label>Plan
+      <select id="plan">
+        <option value="basic">Basic</option>
+        <option value="pro">Pro</option>
+      </select>
+    </label>
+  </p>
+
+  <p id="msg"></p>
+
+  <!-- A scroll container: wheel over THIS must scroll it, not the page —
+       cursor-routed scroll recording test. -->
+  <div id="feed" data-testid="feed"
+       style="height:120px;overflow:auto;border:1px solid #ccc;border-radius:8px">
+    <div style="height:900px;padding:8px">tall feed content…</div>
+  </div>
+
+  <!-- A "map": consumes wheel (preventDefault) and zooms instead of scrolling —
+       exactly what Leaflet / Google Maps do. Consumed-wheel recording test. -->
+  <div id="map" data-testid="map"
+       style="height:100px;border:1px solid #ccc;border-radius:8px;padding:8px;user-select:none;touch-action:none">
+    map · zoom level: <b id="zoom">0</b> · pan: <b id="pan">0,0</b>
+    · shortcuts (Ctrl+B): <b id="shortcut">0</b>
+  </div>
+  <script>
+    const mapEl = document.getElementById("map");
+    mapEl.addEventListener("wheel", (e) => {
+      e.preventDefault(); // no scroll will happen — this wheel is CONSUMED
+      const zoom = document.getElementById("zoom");
+      zoom.textContent = String(Number(zoom.textContent) + Math.sign(e.deltaY));
+    }, { passive: false });
+
+    // Pan-by-drag, the way map libraries do it: down on the element, then moves
+    // tracked on the document until up.
+    let dragFrom = null, panX = 0, panY = 0;
+    mapEl.addEventListener("pointerdown", (e) => { dragFrom = { x: e.clientX, y: e.clientY }; });
+    document.addEventListener("pointermove", (e) => {
+      if (!dragFrom) return;
+      panX += e.clientX - dragFrom.x; panY += e.clientY - dragFrom.y;
+      dragFrom = { x: e.clientX, y: e.clientY };
+      document.getElementById("pan").textContent = panX + "," + panY;
+    });
+    document.addEventListener("pointerup", () => { dragFrom = null; });
+
+    // App shortcut, the way command palettes bind them: requires the modifier to
+    // be HELD when the letter goes down — and checks ALL THREE key identities
+    // (key, code, legacy keyCode), the strictest handler in the wild.
+    document.addEventListener("keydown", (e) => {
+      if (e.ctrlKey && e.key === "b" && e.code === "KeyB" && e.keyCode === 66) {
+        e.preventDefault();
+        const el = document.getElementById("shortcut");
+        el.textContent = String(Number(el.textContent) + 1);
+      }
+    });
+  </script>
+
+  <!-- Filler so the page itself can also scroll. -->
+  <div style="height:2000px"></div>
+  <p id="bottom">You reached the bottom.</p>
+</body>
+</html>

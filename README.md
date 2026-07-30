@@ -1,40 +1,67 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/pages/api-reference/create-next-app).
+# TestFlow
 
-## Getting Started
+Record what you do in your browser, keep it as a Chrome-DevTools-Recorder flow, and
+replay it as a test.
 
-First, run the development server:
+A Chrome extension records every interaction — on any site, across navigations,
+through CSP, inside iframes — and streams the steps live into a Next.js dashboard.
+Nothing is stored until you explicitly save; saved flows are exact DevTools Recorder
+JSON, so they're importable into Chrome DevTools and directly runnable by
+`@puppeteer/replay`.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```
+extension (MV3)                          dashboard (Next.js + Firestore)
+┌───────────────────────────┐            ┌─────────────────────────────┐
+│ content script: recorder  │─ steps ───►│ Record page (React state)   │
+│ service worker: sessions  │  via       │  └─ Save → flows/{id}       │
+│ bridge (dashboard origin) │  bridge    │ Flow page: run-in-tab,      │
+│ popup: record anywhere    │◄─ replay ──│  JSON / Playwright views    │
+└───────────────────────────┘            └─────────────────────────────┘
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Quick start
 
-You can start editing the page by modifying `pages/index.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run build:ext    # then chrome://extensions → Load unpacked → extension/dist
+npm run dev          # http://localhost:3000
+```
 
-[API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) can be accessed on [http://localhost:3000/api/hello](http://localhost:3000/api/hello). This endpoint can be edited in `pages/api/hello.ts`.
+Full walkthrough (Firebase for saving, demo page, limits): **[SETUP.md](SETUP.md)**.
+Design and the reasoning behind each pivot: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
-The `pages/api` directory is mapped to `/api/*`. Files in this directory are treated as [API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) instead of React pages.
+## Layout
 
-This project uses [`next/font`](https://nextjs.org/docs/pages/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Path | What |
+|---|---|
+| [extension/](extension/) | MV3 extension: recorder content script, service worker, bridge, popup |
+| [src/pages/](src/pages/) | Record page, flows list/detail, `/api/flows` |
+| [src/types/flow.ts](src/types/flow.ts) | DevTools Recorder types + the bridge message protocol |
+| [src/codegen/fromFlow.ts](src/codegen/fromFlow.ts) | flow → Playwright source (export) |
+| [scripts/](scripts/) | headless E2E: drives the real extension in Chromium |
 
-## Learn More
+## How it works
 
-To learn more about Next.js, take a look at the following resources:
+- **Recording** is a content script injected on every page at `document_start` — the
+  reason an extension beats any injection trick: it survives hard navigations, ignores
+  the page's CSP, sees iframes, and follows popups (`tabs.onCreated` joins them to the
+  session).
+- **Session state lives in the service worker** (`chrome.storage.session` — MV3
+  workers get evicted, module memory doesn't survive). A dashboard reload rejoins a
+  recording in progress via a state snapshot.
+- **The bridge** content script runs only on the dashboard origin and relays
+  `window.postMessage` ↔ `chrome.runtime` — the dashboard never needs the extension id.
+- **Selectors** are computed at record time as ranked DevTools groups
+  (`aria/` → css → `xpath/` → `pierce/` → `text/`); replay falls back through the
+  list until one resolves.
+- **Secrets:** password fields record an empty value; the recorder only captures
+  trusted (real-user) events.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn-pages-router) - an interactive Next.js tutorial.
+## Checks
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/pages/building-your-application/deploying) for more details.
+```bash
+npm run typecheck    # dashboard + extension
+npm run lint
+npm run e2e          # loads the built extension into Chromium, records, asserts JSON
+npm run e2e:replay   # replays steps through the extension bridge
+```

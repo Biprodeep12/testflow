@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px/1.5 system-ui, sans-serif; width: 280px; margin: 0; padding: 14px;
+           background: #18181b; color: #fafafa; }
+    h1 { font-size: 13px; margin: 0 0 10px; display: flex; align-items: center; gap: 6px; }
+    button { font: inherit; width: 100%; padding: 8px 10px; margin-top: 8px; border: 0;
+             border-radius: 8px; cursor: pointer; background: #fafafa; color: #18181b; }
+    button.secondary { background: #3f3f46; color: #fafafa; }
+    button:disabled { opacity: .4; cursor: default; }
+    #status { color: #a1a1aa; min-height: 1.4em; }
+    #status.rec { color: #34d399; }
+    a { color: #a1a1aa; font-size: 12px; }
+    .row { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>⏺ TestFlow Recorder</h1>
+  <div id="status">…</div>
+  <button id="record">Record this tab</button>
+  <button id="stop" class="secondary" hidden>Stop recording</button>
+  <button id="download" class="secondary" hidden>Download JSON</button>
+  <div class="row"><a id="dash" href="#" target="_blank">Open dashboard ↗</a></div>
+  <script src="popup.js"></script>
+</body>
+</html>

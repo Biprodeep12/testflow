@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // The extension has its own tsconfig; lint scope stays the Next.js app.
+    "extension/**",
+    "scripts/**",
+    "public/**",
   ]),
 ]);
 
