@@ -1,6 +1,11 @@
 "use strict";
 (() => {
   // extension/src/popup/popup.ts
+  var STEP_PREFIX = "tf-s-";
+  async function recordedSteps() {
+    const all = await chrome.storage.session.get(null);
+    return Object.entries(all).filter(([key]) => key.startsWith(STEP_PREFIX)).map(([key, value]) => [Number(key.slice(STEP_PREFIX.length)), value]).sort((a, b) => a[0] - b[0]).map(([, value]) => value.step);
+  }
   var statusEl = document.getElementById("status");
   var recordBtn = document.getElementById("record");
   var stopBtn = document.getElementById("stop");
@@ -19,7 +24,7 @@
   async function refresh() {
     const session = await getSession();
     if (session?.mode === "record") {
-      statusEl.textContent = `\u25CF recording \u2014 ${session.steps.length} steps`;
+      statusEl.textContent = `\u25CF recording \u2014 ${session.stepCount} steps`;
       statusEl.className = "rec";
       recordBtn.hidden = true;
       stopBtn.hidden = false;
@@ -39,11 +44,20 @@
         statusEl.textContent = "Open a normal http(s) page first.";
         return;
       }
+      await chrome.storage.session.remove("tf-frames");
+      const previous = await chrome.storage.session.get(null);
+      const stale = Object.keys(previous).filter((key) => key.startsWith(STEP_PREFIX));
+      if (stale.length > 0) await chrome.storage.session.remove(stale);
       await chrome.storage.session.set({
         "tf-session": {
           mode: "record",
           tabIds: [tab.id],
-          steps: [],
+          targets: { [tab.id]: "t0" },
+          targetUrls: { t0: tab.url },
+          nextTarget: 1,
+          stepCount: 0,
+          lastStepId: 0,
+          nextStepId: 1,
           startedAt: Date.now(),
           sourceUrl: tab.url
         }
@@ -78,7 +92,7 @@
       if (!session) return;
       const flow = {
         title: `Recording ${(/* @__PURE__ */ new Date()).toLocaleString()}`,
-        steps: session.steps
+        steps: await recordedSteps()
       };
       const url = "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(flow, null, 4));
       const link = document.createElement("a");

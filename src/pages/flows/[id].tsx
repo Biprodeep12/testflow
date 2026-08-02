@@ -6,12 +6,15 @@ import { apiFetch, del } from "@/lib/client";
 import { usePoll } from "@/hooks/usePoll";
 import { flowToPlaywright } from "@/codegen/fromFlow";
 import {
+  BUNDLE_EXTENSION,
   DEFAULT_TIMEOUT_MS,
   exportSteps,
+  toBundle,
   type AgentMessage,
   type FlowDoc,
   type FlowStep,
   type HubMessage,
+  type StepMeta,
 } from "@/types/flow";
 
 type View = "steps" | "json" | "playwright";
@@ -41,8 +44,14 @@ export default function FlowPage() {
   const [view, setView] = useState<View>("steps");
   const [runState, setRunState] = useState<RunState>("idle");
   const [speed, setSpeed] = useState<Speed>("fast");
+  // A visible pointer that glides to each target before the click. Costs a little
+  // time per step, which is why it can be turned off.
+  const [showCursor, setShowCursor] = useState(true);
   const [statuses, setStatuses] = useState<StepStatus[]>([]);
   const [stepErrors, setStepErrors] = useState<(string | undefined)[]>([]);
+  // Steps that ran, but not as recorded — e.g. synthetic events because real input
+  // was unavailable. Shown, never swallowed.
+  const [stepNotes, setStepNotes] = useState<(string | undefined)[]>([]);
   // Resolvers the message listener completes: ready/settled handshakes + step results.
   const waiters = useRef<{
     ready?: () => void;
@@ -50,7 +59,7 @@ export default function FlowPage() {
     /** counters de-race settle: `load` may fire before the waiter is armed */
     readyCount: number;
     settledCount: number;
-    result: Map<number, (r: { ok: boolean; error?: string }) => void>;
+    result: Map<number, (r: { ok: boolean; error?: string; note?: string }) => void>;
   }>({ readyCount: 0, settledCount: 0, result: new Map() });
 
   const load = useCallback(async () => {
@@ -86,7 +95,7 @@ export default function FlowPage() {
         const resolve = waiters.current.result.get(data.id);
         if (resolve) {
           waiters.current.result.delete(data.id);
-          resolve({ ok: data.ok, error: data.error });
+          resolve({ ok: data.ok, error: data.error, note: data.note });
         }
       }
     };
@@ -128,8 +137,13 @@ export default function FlowPage() {
       };
     });
 
-  const sendStep = (stepId: number, step: FlowStep) =>
-    new Promise<{ ok: boolean; error?: string }>((resolve) => {
+  const sendStep = (
+    stepId: number,
+    step: FlowStep,
+    meta?: StepMeta,
+    withCursor = true,
+  ) =>
+    new Promise<{ ok: boolean; error?: string; note?: string }>((resolve) => {
       const timer = setTimeout(() => {
         waiters.current.result.delete(stepId);
         resolve({ ok: false, error: `no response after ${STEP_TIMEOUT_MS / 1000}s` });
@@ -138,7 +152,16 @@ export default function FlowPage() {
         clearTimeout(timer);
         resolve(result);
       });
-      sendHub({ source: "tf-hub", kind: "runStep", id: stepId, step });
+      // meta carries the tab and frame the step was recorded in — the extension
+      // routes to exactly that frame instead of broadcasting and racing.
+      sendHub({
+        source: "tf-hub",
+        kind: "runStep",
+        id: stepId,
+        step,
+        meta,
+        cursor: withCursor,
+      });
     });
 
   const runInTab = async () => {
@@ -154,6 +177,7 @@ export default function FlowPage() {
     setRunState("connecting");
     setStatuses(steps.map(() => "pending"));
     setStepErrors(steps.map(() => undefined));
+    setStepNotes(steps.map(() => undefined));
 
     // The extension opens the tab in replay mode; the first cs-ready is our go.
     waiters.current.readyCount = 0;
@@ -188,12 +212,19 @@ export default function FlowPage() {
     // recording (capped), so timing-sensitive UI (debounces, animations,
     // dropdowns) behaves like it did for you.
     let previousTs: number | null = null;
-    const paceFor = (step: FlowStep): number => {
-      if (speed !== "recorded") return 0;
-      const ts = step.timestamp;
-      if (typeof ts !== "number") return LEGACY_PAUSE_MS;
+    /**
+     * Paced on the MONOTONIC stamp when the flow has one. Wall-clock timestamps
+     * move when the system clock is corrected mid-recording, which silently turns a
+     * 200ms gap into a negative one; performance-based stamps cannot.
+     */
+    const stampOf = (index: number): number | undefined =>
+      flow.meta?.[index]?.tMono ?? steps[index].timestamp;
+    const paceFor = (index: number): number => {
+      const ts = stampOf(index);
+      if (typeof ts !== "number") return speed === "recorded" ? LEGACY_PAUSE_MS : 0;
       const gap = previousTs === null ? 0 : ts - previousTs;
       previousTs = ts;
+      if (speed !== "recorded") return 0;
       return Math.min(Math.max(gap, 0), MAX_RECORDED_PAUSE_MS);
     };
 
@@ -207,21 +238,23 @@ export default function FlowPage() {
         (step.type === "navigate" && step.url === nav.url && i <= 1)
       ) {
         // Skipped steps still anchor the clock so the first real step's gap is honest.
-        if (typeof step.timestamp === "number") previousTs = step.timestamp;
+        const stamp = flow.meta?.[i]?.tMono ?? step.timestamp;
+        if (typeof stamp === "number") previousTs = stamp;
         mark(i, "skipped");
         continue;
       }
 
-      const pause = paceFor(step);
+      const pause = paceFor(i);
       if (pause > 0) await sleep(pause);
 
       mark(i, "running");
       // Per-step wait budget rides on the step itself — the native DevTools field.
       const timedStep: FlowStep = { ...step, timeout: step.timeout ?? flowTimeout };
+      const stepMeta = flow.meta?.[i];
 
       if (step.type === "navigate") {
         // The page unloads on navigation; the fresh page's ready is the outcome.
-        void sendStep(i, timedStep);
+        void sendStep(i, timedStep, stepMeta, showCursor);
         const ok = await waitReady(STEP_TIMEOUT_MS);
         if (ok) await waitSettled(flowTimeout); // redirect settle — both speeds
         mark(i, ok ? "pass" : "fail", ok ? undefined : "navigation timed out");
@@ -229,7 +262,12 @@ export default function FlowPage() {
         continue;
       }
 
-      const result = await sendStep(i, timedStep);
+      const result = await sendStep(i, timedStep, stepMeta, showCursor);
+      if (result.note) {
+        setStepNotes((previous) =>
+          previous.map((n, index) => (index === i ? result.note : n)),
+        );
+      }
 
       if (!result.ok && step.assertedEvents?.some((e) => e.type === "navigation")) {
         // The click killed the document before it could reply ("tab did not
@@ -260,24 +298,38 @@ export default function FlowPage() {
     setRunState("idle");
   };
 
-  const download = () => {
+  const save = (json: string, suffix: string) => {
     if (!flow) return;
-    // exportSteps strips TestFlow-only fields (timestamps) — pure DevTools format.
-    const json = JSON.stringify(
-      {
-        title: flow.title,
-        timeout: flow.timeout ?? DEFAULT_TIMEOUT_MS,
-        steps: exportSteps(flow.steps),
-      },
-      null,
-      4,
-    );
     const blob = new Blob([json], { type: "application/json" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `${flow.title.replace(/[^\w-]+/g, "-")}.json`;
+    link.download = `${flow.title.replace(/[^\w-]+/g, "-")}${suffix}`;
     link.click();
     URL.revokeObjectURL(link.href);
+  };
+
+  // Interoperable export: exactly what DevTools would have written.
+  const download = () => {
+    if (!flow) return;
+    save(
+      JSON.stringify(
+        {
+          title: flow.title,
+          timeout: flow.timeout ?? DEFAULT_TIMEOUT_MS,
+          steps: exportSteps(flow.steps),
+        },
+        null,
+        4,
+      ),
+      ".json",
+    );
+  };
+
+  // Full recording: the same steps PLUS the sidecars, which is what the Playwright
+  // runner needs to reproduce the session rather than just repeat the actions.
+  const downloadBundle = () => {
+    if (!flow) return;
+    save(toBundle(flow), BUNDLE_EXTENSION);
   };
 
   const remove = async () => {
@@ -329,6 +381,19 @@ export default function FlowPage() {
               <option value="recorded">As recorded</option>
             </select>
           </label>
+          <label
+            className="flex items-center gap-1.5 text-sm text-zinc-600 dark:text-zinc-400"
+            title="Glides a visible pointer to each target before acting. Adds a moment per step."
+          >
+            <input
+              type="checkbox"
+              checked={showCursor}
+              onChange={(event) => setShowCursor(event.target.checked)}
+              disabled={runState === "running" || runState === "connecting"}
+              className="h-4 w-4 rounded border-zinc-300 dark:border-zinc-700"
+            />
+            Cursor
+          </label>
           {runState === "running" || runState === "connecting" ? (
             <Button variant="danger" onClick={stopRun}>
               Stop
@@ -336,7 +401,10 @@ export default function FlowPage() {
           ) : (
             <Button onClick={runInTab}>Run in tab</Button>
           )}
-          <Button variant="secondary" onClick={download}>
+          <Button variant="secondary" onClick={downloadBundle} title="Full recording — what `npm run flow` replays">
+            Download bundle
+          </Button>
+          <Button variant="secondary" onClick={download} title="Interoperable Chrome DevTools Recorder JSON">
             Download JSON
           </Button>
           <Button variant="danger" onClick={remove}>
@@ -387,6 +455,7 @@ export default function FlowPage() {
               steps={flow.steps}
               statuses={runState === "idle" ? undefined : statuses}
               errors={stepErrors}
+              notes={stepNotes}
             />
           </div>
         )}
@@ -405,7 +474,14 @@ export default function FlowPage() {
         )}
         {view === "playwright" && (
           <pre className="max-h-160 overflow-auto p-4 font-mono text-xs leading-5">
-            {flowToPlaywright({ title: flow.title, steps: flow.steps })}
+            {flowToPlaywright({
+              title: flow.title,
+              steps: flow.steps,
+              // The sidecars are what make the export reproduce the session:
+              // env drives test.use(), meta drives frame and tab targeting.
+              meta: flow.meta,
+              env: flow.env,
+            })}
           </pre>
         )}
       </Card>

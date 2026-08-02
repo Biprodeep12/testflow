@@ -7,10 +7,15 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit && tsc -p extension",
     "build:ext": "node extension/build.mjs",
     "e2e": "npm run build:ext && tsx scripts/e2e-record.mts",
-    "e2e:replay": "npm run build:ext && tsx scripts/e2e-replay.mts"
+    "e2e:replay": "npm run build:ext && tsx scripts/e2e-replay.mts",
+    "e2e:runner": "tsx scripts/e2e-runner.mts",
+    "e2e:cli": "npm run build:ext && tsx scripts/e2e-cli.mts",
+    "flow": "tsx scripts/run-flow.mts",
+    "e2e:long": "npm run build:ext && tsx scripts/e2e-longflow.mts"
   },
   "dependencies": {
     "firebase-admin": "^14.2.0",

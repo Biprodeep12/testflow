@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TF Demo · many frames</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 1rem; }
+    iframe { width: 180px; height: 90px; border: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <h1>Many frames</h1>
+  <p>
+    What a real page looks like: ads, embeds and widgets, each its own frame. Every
+    one runs the content script, negotiates its position with its parent, and
+    registers itself with the service worker — all while the user is interacting.
+    <code>?f=</code> sets how many, <code>?churn=1</code> reloads them continuously.
+  </p>
+
+  <button id="hit" onclick="
+    var n = document.getElementById('hits');
+    n.textContent = String(Number(n.textContent) + 1);
+  ">Hit me</button>
+  <span>hits: <b id="hits">0</b></span>
+
+  <div id="frames"></div>
+
+  <script>
+    (function () {
+      var params = new URLSearchParams(location.search);
+      var count = Math.max(0, Number(params.get("f") || 25));
+      var host = document.getElementById("frames");
+      for (var i = 0; i < count; i++) {
+        var f = document.createElement("iframe");
+        f.src = "/demo.html?frame=" + i;
+        f.title = "widget " + i;
+        host.appendChild(f);
+      }
+      if (params.get("churn")) {
+        // Ad slots refresh. Every reload is another round of frame negotiation and
+        // another registration write.
+        setInterval(function () {
+          var all = host.querySelectorAll("iframe");
+          for (var j = 0; j < Math.min(5, all.length); j++) {
+            var pick = all[Math.floor(Math.random() * all.length)];
+            pick.src = "/demo.html?frame=r" + Date.now() + "-" + j;
+          }
+        }, 1500);
+      }
+    })();
+  </script>
+</body>
+</html>

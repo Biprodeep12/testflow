@@ -39,7 +39,7 @@ export default route(async (req: NextApiRequest, res: ApiRes) => {
   const body = parseBody(req, res, saveFlowSchema);
   if (!body) return;
 
-  const size = JSON.stringify(body.steps).length;
+  const size = JSON.stringify([body.steps, body.meta ?? [], body.env ?? {}]).length;
   if (size > MAX_BYTES) {
     return sendErr(
       res,
@@ -61,6 +61,10 @@ export default route(async (req: NextApiRequest, res: ApiRes) => {
     toStored({
       title: body.title,
       steps: body.steps as FlowDoc["steps"],
+      // Sidecars: what makes the replay look like the recording rather than merely
+      // perform the same actions.
+      meta: body.meta as FlowDoc["meta"],
+      env: body.env as FlowDoc["env"],
       sourceUrl: body.sourceUrl ?? firstNav?.url ?? "",
       stepCount: body.steps.length,
       timeout: body.timeout ?? 5000,

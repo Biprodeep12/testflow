@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TF Demo · heavy DOM</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 1rem; }
+    .card { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8px; margin: 2px 0; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+    #feed, #side { height: 140px; overflow: auto; border: 1px solid #ccc; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Heavy page</h1>
+  <p>
+    A realistic listing page: thousands of nodes, deep nesting, repeated markup and
+    two scroll containers. Recording cost is dominated by how expensive it is to
+    describe an element on a page like this — a five-element demo hides all of it.
+  </p>
+
+  <button id="hit" onclick="
+    var n = document.getElementById('hits');
+    n.textContent = String(Number(n.textContent) + 1);
+  ">Hit me</button>
+  <span>hits: <b id="hits">0</b></span>
+
+  <div id="feed"></div>
+  <div id="side"></div>
+  <div class="grid" id="grid"></div>
+
+  <script>
+    (function () {
+      // ?n=<multiplier> scales the page, so recording cost can be measured against
+      // node count rather than guessed at.
+      var mult = Math.max(1, Number(new URLSearchParams(location.search).get("n") || 1));
+      // ~6000 elements, nested a few levels deep, with the repeated class names and
+      // generated ids that real listing pages have.
+      function fill(host, count, prefix) {
+        var frag = document.createDocumentFragment();
+        for (var i = 0; i < count; i++) {
+          var card = document.createElement("div");
+          card.className = "card item item-" + (i % 7);
+          card.id = prefix + "-" + i;
+          var title = document.createElement("div");
+          title.className = "title";
+          title.textContent = prefix + " item " + i;
+          var meta = document.createElement("div");
+          meta.className = "meta";
+          var a = document.createElement("span");
+          a.className = "price";
+          a.textContent = "₹" + (1000 + i);
+          var b = document.createElement("span");
+          b.className = "tag";
+          b.textContent = "tag-" + (i % 13);
+          meta.appendChild(a);
+          meta.appendChild(b);
+          card.appendChild(title);
+          card.appendChild(meta);
+          frag.appendChild(card);
+        }
+        host.appendChild(frag);
+      }
+      // The hard case, and the common one: no ids anywhere, deep nesting, identical
+      // sibling markup. Describing an element here means walking to the root and
+      // testing a long positional selector against the whole document.
+      var noid = document.createElement("div");
+      noid.className = "listing";
+      var cursor = noid;
+      for (var d = 0; d < 6; d++) {
+        var wrap = document.createElement("div");
+        wrap.className = "row wrapper level-" + d;
+        cursor.appendChild(wrap);
+        cursor = wrap;
+      }
+      for (var j = 0; j < 200 * mult; j++) {
+        var leaf = document.createElement("div");
+        leaf.className = "card item";
+        var inner = document.createElement("div");
+        inner.className = "title";
+        var deep = document.createElement("span");
+        deep.className = "label";
+        deep.textContent = "no-id leaf " + j;
+        inner.appendChild(deep);
+        leaf.appendChild(inner);
+        cursor.appendChild(leaf);
+      }
+      document.body.appendChild(noid);
+
+      fill(document.getElementById("feed"), 400 * mult, "feed");
+      fill(document.getElementById("side"), 400 * mult, "side");
+      fill(document.getElementById("grid"), 400 * mult, "grid");
+      var count = document.querySelectorAll("*").length;
+      var note = document.createElement("p");
+      note.id = "node-count";
+      note.textContent = "nodes: " + count;
+      document.body.insertBefore(note, document.getElementById("feed"));
+    })();
+  </script>
+</body>
+</html>

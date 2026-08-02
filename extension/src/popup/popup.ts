@@ -6,9 +6,22 @@
 type Session = {
   mode: "record" | "replay" | "stopped";
   tabIds: number[];
-  steps: unknown[];
+  /** steps live one key per step (tf-s-<id>), not in the session — see the SW */
+  stepCount: number;
   sourceUrl: string;
 };
+
+const STEP_PREFIX = "tf-s-";
+
+/** Every recorded step, in order, gathered from the per-step keys. */
+async function recordedSteps(): Promise<unknown[]> {
+  const all = await chrome.storage.session.get(null);
+  return Object.entries(all)
+    .filter(([key]) => key.startsWith(STEP_PREFIX))
+    .map(([key, value]) => [Number(key.slice(STEP_PREFIX.length)), value] as const)
+    .sort((a, b) => a[0] - b[0])
+    .map(([, value]) => (value as { step: unknown }).step);
+}
 
 const statusEl = document.getElementById("status") as HTMLElement;
 const recordBtn = document.getElementById("record") as HTMLButtonElement;
@@ -32,7 +45,7 @@ async function activeTab(): Promise<chrome.tabs.Tab | undefined> {
 async function refresh(): Promise<void> {
   const session = await getSession();
   if (session?.mode === "record") {
-    statusEl.textContent = `● recording — ${session.steps.length} steps`;
+    statusEl.textContent = `● recording — ${session.stepCount} steps`;
     statusEl.className = "rec";
     recordBtn.hidden = true;
     stopBtn.hidden = false;
@@ -55,11 +68,21 @@ recordBtn.addEventListener("click", () => {
     }
     // Mark THIS tab as the session (no new tab): store the session directly, then
     // flip the content script on and reload-free seed via its cs-ready round trip.
+    await chrome.storage.session.remove("tf-frames");
+    // A new session starts from an empty recording — drop the previous step keys.
+    const previous = await chrome.storage.session.get(null);
+    const stale = Object.keys(previous).filter((key) => key.startsWith(STEP_PREFIX));
+    if (stale.length > 0) await chrome.storage.session.remove(stale);
     await chrome.storage.session.set({
       "tf-session": {
         mode: "record",
         tabIds: [tab.id],
-        steps: [],
+        targets: { [tab.id]: "t0" },
+        targetUrls: { t0: tab.url },
+        nextTarget: 1,
+        stepCount: 0,
+        lastStepId: 0,
+        nextStepId: 1,
         startedAt: Date.now(),
         sourceUrl: tab.url,
       },
@@ -100,7 +123,7 @@ downloadBtn.addEventListener("click", () => {
     if (!session) return;
     const flow = {
       title: `Recording ${new Date().toLocaleString()}`,
-      steps: session.steps,
+      steps: await recordedSteps(),
     };
     const url =
       "data:application/json;charset=utf-8," +

@@ -88,12 +88,15 @@ export function Button({
   disabled,
   variant = "primary",
   type = "button",
+  title,
 }: {
   children: ReactNode;
   onClick?: () => void;
   disabled?: boolean;
   variant?: "primary" | "secondary" | "danger";
   type?: "button" | "submit";
+  /** hover text — used where two buttons differ in a way the label cannot carry */
+  title?: string;
 }) {
   const styles = {
     primary:
@@ -109,6 +112,7 @@ export function Button({
       type={type}
       onClick={onClick}
       disabled={disabled}
+      title={title}
       className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${styles}`}
     >
       {children}

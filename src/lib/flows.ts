@@ -8,28 +8,53 @@
  */
 
 import { getDb } from "./firebase-admin";
-import type { FlowDoc, FlowStep } from "@/types/flow";
+import type { EnvRecord, FlowDoc, FlowStep, StepMeta } from "@/types/flow";
 
-/** What actually sits in Firestore. */
-type StoredFlow = Omit<FlowDoc, "id" | "steps"> & { stepsJson: string };
+/**
+ * What actually sits in Firestore. The step sidecar is serialized for the same
+ * reason the steps are: StepMeta.frameChain[].selectors is string[][], another
+ * array-in-array Firestore refuses.
+ */
+type StoredFlow = Omit<FlowDoc, "id" | "steps" | "meta"> & {
+  stepsJson: string;
+  metaJson?: string;
+};
 
 export function flowsRef() {
   return getDb().collection("flows");
 }
 
 export function toStored(
-  flow: Omit<FlowDoc, "id" | "steps"> & { steps: FlowStep[] },
+  flow: Omit<FlowDoc, "id" | "steps" | "meta"> & {
+    steps: FlowStep[];
+    meta?: StepMeta[];
+  },
 ): StoredFlow {
-  const { steps, ...rest } = flow;
-  return { ...rest, stepsJson: JSON.stringify(steps) };
+  const { steps, meta, ...rest } = flow;
+  // Firestore rejects an explicit `undefined` value outright, and an unsaved flow
+  // legitimately has no env (recorded before the field existed, or imported JSON).
+  const defined = Object.fromEntries(
+    Object.entries(rest).filter(([, value]) => value !== undefined),
+  ) as Omit<StoredFlow, "stepsJson" | "metaJson">;
+  return {
+    ...defined,
+    stepsJson: JSON.stringify(steps),
+    ...(meta?.length ? { metaJson: JSON.stringify(meta) } : {}),
+  };
 }
 
 export function fromSnapshot(
   doc: FirebaseFirestore.DocumentSnapshot,
 ): FlowDoc {
-  const data = doc.data() as Partial<StoredFlow> & { steps?: FlowStep[] };
+  const data = doc.data() as Partial<StoredFlow> & {
+    steps?: FlowStep[];
+    env?: EnvRecord;
+  };
   const steps: FlowStep[] =
     data.steps ?? (data.stepsJson ? (JSON.parse(data.stepsJson) as FlowStep[]) : []);
+  const meta: StepMeta[] | undefined = data.metaJson
+    ? (JSON.parse(data.metaJson) as StepMeta[])
+    : undefined;
   return {
     id: doc.id,
     title: data.title ?? "flow",
@@ -39,5 +64,7 @@ export function fromSnapshot(
     updatedAt: data.updatedAt ?? 0,
     timeout: data.timeout,
     steps,
+    meta,
+    env: data.env,
   };
 }

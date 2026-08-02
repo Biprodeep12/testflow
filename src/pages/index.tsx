@@ -4,10 +4,14 @@ import { Button, Card, ErrorNote, Layout } from "@/components/Layout";
 import { FlowStepList } from "@/components/FlowStepList";
 import { post } from "@/lib/client";
 import {
+  BUNDLE_EXTENSION,
   exportSteps,
+  toBundle,
   type AgentMessage,
+  type EnvRecord,
   type FlowStep,
   type HubMessage,
+  type StepMeta,
 } from "@/types/flow";
 
 type Phase = "form" | "waiting" | "recording" | "stopped";
@@ -26,6 +30,11 @@ export default function RecordPage() {
   const [url, setUrl] = useState("");
   const [phase, setPhase] = useState<Phase>("form");
   const [steps, setSteps] = useState<FlowStep[]>([]);
+  // Sidecars, kept index-aligned with `steps`: where each step ran, and the
+  // environment it ran in. Without these a saved flow can be re-performed but not
+  // reproduced.
+  const [meta, setMeta] = useState<StepMeta[]>([]);
+  const [env, setEnv] = useState<EnvRecord | undefined>(undefined);
   const [title, setTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -48,8 +57,12 @@ export default function RecordPage() {
           // Full state from the SW — also how a dashboard reload rejoins a
           // recording already in progress.
           setExtensionReady(true);
+          // A recording that lost a step must not look complete when it is saved.
+          if (data.error) setError(data.error);
           if (data.recording || data.steps.length > 0) {
             setSteps(data.steps);
+            setMeta(data.meta);
+            if (data.env) setEnv(data.env);
             setPhase((current) =>
               data.recording
                 ? "recording"
@@ -62,6 +75,7 @@ export default function RecordPage() {
           break;
         case "step":
           setSteps((previous) => [...previous, data.step]);
+          setMeta((previous) => [...previous, data.meta]);
           break;
         case "stopped":
           setPhase((current) =>
@@ -86,7 +100,9 @@ export default function RecordPage() {
   }, []);
 
   useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth" });
+    // "auto", not "smooth": steps arrive faster than a smooth scroll can finish, so
+    // the animations queue up and the list lags further behind the longer you record.
+    bottom.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [steps.length]);
 
   const start = (event: React.FormEvent) => {
@@ -98,6 +114,8 @@ export default function RecordPage() {
       return;
     }
     setSteps([]);
+    setMeta([]);
+    setEnv(undefined);
     setTitle(defaultTitle());
     setPhase("waiting");
     // The EXTENSION opens the tab and starts recording — no popup blockers, no
@@ -109,6 +127,8 @@ export default function RecordPage() {
 
   const discard = () => {
     setSteps([]);
+    setMeta([]);
+    setEnv(undefined);
     setPhase("form");
   };
 
@@ -121,6 +141,8 @@ export default function RecordPage() {
         sourceUrl: url.trim() || undefined,
         timeout: 5000, // native flow-level wait budget (selectors, redirects, loads)
         steps,
+        meta,
+        env,
       });
       await router.push(`/flows/${data.flowId}`);
     } catch (err) {
@@ -129,24 +151,34 @@ export default function RecordPage() {
     }
   };
 
-  const download = () => {
-    // Timestamps stay in saved flows (they drive "as recorded" replay speed) but are
-    // stripped from downloads so the JSON is byte-compatible with DevTools.
-    const json = JSON.stringify(
-      {
-        title: title.trim() || defaultTitle(),
-        timeout: 5000,
-        steps: exportSteps(steps),
-      },
-      null,
-      4,
-    );
+  const save2 = (json: string, suffix: string) => {
     const blob = new Blob([json], { type: "application/json" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `${(title || "recording").replace(/[^\w-]+/g, "-")}.json`;
+    link.download = `${(title || "recording").replace(/[^\w-]+/g, "-")}${suffix}`;
     link.click();
     URL.revokeObjectURL(link.href);
+  };
+
+  const download = () => {
+    // Timestamps stay in saved flows (they drive "as recorded" replay speed) but are
+    // stripped from downloads so the JSON is byte-compatible with DevTools.
+    save2(
+      JSON.stringify(
+        { title: title.trim() || defaultTitle(), timeout: 5000, steps: exportSteps(steps) },
+        null,
+        4,
+      ),
+      ".json",
+    );
+  };
+
+  // The full recording, runnable by `npm run flow` without Firebase in the loop.
+  const downloadBundle = () => {
+    save2(
+      toBundle({ title: title.trim() || defaultTitle(), timeout: 5000, steps, meta, env }),
+      BUNDLE_EXTENSION,
+    );
   };
 
   const interactionCount = steps.filter(
@@ -266,6 +298,9 @@ export default function RecordPage() {
                   <Button onClick={save} disabled={saving || interactionCount === 0}>
                     {saving ? "Saving…" : "Save flow"}
                   </Button>
+                  <Button variant="secondary" onClick={downloadBundle}>
+                    Download bundle
+                  </Button>
                   <Button variant="secondary" onClick={download}>
                     Download JSON
                   </Button>
@@ -292,7 +327,9 @@ export default function RecordPage() {
               </p>
             ) : (
               <div className="max-h-128 overflow-y-auto">
-                <FlowStepList steps={steps} />
+                {/* Live view: this re-renders on every captured step, so the drawn
+                    list is bounded. The recording keeps everything. */}
+                <FlowStepList steps={steps} maxRendered={150} />
                 <div ref={bottom} />
               </div>
             )}

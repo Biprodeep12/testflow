@@ -49,15 +49,40 @@ export function FlowStepList({
   steps,
   statuses,
   errors,
+  notes,
+  maxRendered,
 }: {
   steps: FlowStep[];
   /** replay mode: one status per step, same index */
   statuses?: StepStatus[];
   errors?: (string | undefined)[];
+  /** the step ran, but not the way it was recorded — a difference worth seeing */
+  notes?: (string | undefined)[];
+  /**
+   * Render at most this many, most recent last.
+   *
+   * While recording, this list re-renders on every captured step. Rendering the
+   * whole history each time makes a long session progressively slower to record —
+   * the cost of watching grows with what you have already watched. Older rows are
+   * summarised instead; nothing is dropped from the flow itself.
+   */
+  maxRendered?: number;
 }) {
+  const offset =
+    maxRendered && steps.length > maxRendered ? steps.length - maxRendered : 0;
+  const shown = offset > 0 ? steps.slice(offset) : steps;
+
   return (
     <ol className="divide-y divide-zinc-100 dark:divide-zinc-800">
-      {steps.map((step, index) => (
+      {offset > 0 && (
+        <li className="px-4 py-2 text-center text-xs text-zinc-500">
+          {offset} earlier {offset === 1 ? "step" : "steps"} — all of them are saved,
+          only the latest {maxRendered} are drawn
+        </li>
+      )}
+      {shown.map((step, shownIndex) => {
+        const index = shownIndex + offset;
+        return (
         <li
           key={index}
           data-testid="tf-step"
@@ -98,9 +123,18 @@ export function FlowStepList({
                 {errors[index]}
               </span>
             )}
+            {notes?.[index] && (
+              <span
+                title={notes[index]}
+                className="mt-0.5 block truncate text-xs text-amber-600 dark:text-amber-500"
+              >
+                ⚠ {notes[index]}
+              </span>
+            )}
           </span>
         </li>
-      ))}
+        );
+      })}
     </ol>
   );
 }

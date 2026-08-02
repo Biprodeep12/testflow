@@ -45,6 +45,16 @@
     <div style="height:900px;padding:8px">tall feed content…</div>
   </div>
 
+  <!-- The one thing a synthetic event cannot fake. dispatchEvent() always produces
+       isTrusted:false; only real input from the browser sets it true. Apps gate on
+       this, and so does anything relying on :focus-visible or native scrolling. -->
+  <p>last click trusted: <b id="trusted">—</b></p>
+  <script>
+    document.addEventListener("click", function (e) {
+      document.getElementById("trusted").textContent = String(e.isTrusted);
+    }, true);
+  </script>
+
   <!-- A "map": consumes wheel (preventDefault) and zooms instead of scrolling —
        exactly what Leaflet / Google Maps do. Consumed-wheel recording test. -->
   <div id="map" data-testid="map"

@@ -3,7 +3,7 @@
   "name": "TestFlow Recorder",
   "version": "0.1.0",
   "description": "Records browser interactions as Chrome DevTools Recorder flows and streams them to the TestFlow dashboard.",
-  "permissions": ["storage", "tabs"],
+  "permissions": ["storage", "tabs", "debugger", "downloads"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "sw.js" },
   "action": {

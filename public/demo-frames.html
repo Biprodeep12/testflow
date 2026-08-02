@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TF Demo · frames, routes, popups</title>
+  <style>
+    body { font: 15px/1.6 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    iframe { width: 100%; height: 240px; border: 1px solid #ccc; border-radius: 8px; }
+    .row { display: flex; gap: 1rem; }
+    .row > div { flex: 1; }
+    h2 { font-size: 13px; text-transform: uppercase; color: #666; margin: 1rem 0 .25rem; }
+    #route { color: #7c3aed; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Frames, routes and popups</h1>
+  <p>
+    The page the runner E2E drives. Two identical shops in iframes: acting on the
+    <b>second</b> one and leaving the first untouched is what proves a step reached
+    the frame it was recorded in, rather than the first frame that answered.
+  </p>
+
+  <div class="row">
+    <div>
+      <h2>frame 0</h2>
+      <iframe id="shop-a" name="shop-a" src="/demo.html" title="shop A"></iframe>
+    </div>
+    <div>
+      <h2>frame 1</h2>
+      <iframe id="shop-b" name="shop-b" src="/demo.html" title="shop B"></iframe>
+    </div>
+  </div>
+
+  <h2>SPA route</h2>
+  <!-- pushState only: no page load, so the recorder must catch it from the
+       main-world history patch or the transition is invisible to the flow. -->
+  <button id="go-checkout" onclick="
+    history.pushState({}, '', '/demo-frames.html#/checkout');
+    document.title = 'TF Demo · checkout';
+    document.getElementById('route').textContent = 'checkout';
+  ">Go to checkout</button>
+  <span>route: <span id="route">home</span></span>
+
+  <h2>Native dialog</h2>
+  <!-- confirm() BLOCKS. A replay that cannot answer it hangs forever, and one that
+       answers differently takes the other branch — so the answer is part of the flow. -->
+  <button id="confirm-delete" onclick="
+    document.getElementById('confirm-result').textContent =
+      confirm('Delete everything?') ? 'deleted' : 'kept';
+  ">Delete</button>
+  <span>result: <b id="confirm-result">—</b></span>
+
+  <h2>Upload</h2>
+  <input id="upload" type="file" onchange="
+    var f = this.files[0];
+    document.getElementById('upload-result').textContent =
+      f ? f.name + ':' + f.size : '—';
+  " />
+  <span>file: <b id="upload-result">—</b></span>
+
+  <h2>Links that navigate</h2>
+  <!-- The ordinary case: a click that tears down the document. The runner has to
+       survive its own element handle dying mid-step. -->
+  <p>
+    <a id="go-shop" href="/demo.html">Open the shop</a>
+    &middot;
+    <a id="go-redirect" href="/api/redirect?to=/demo.html">Open it via a 302</a>
+    &middot;
+    <a id="go-js" href="#" onclick="location.href='/demo.html'; return false;">Open it from JS</a>
+    &middot;
+    <a id="go-blank" href="/demo.html" target="_blank">Open it in a new tab</a>
+  </p>
+  <!-- A link a sticky bar sits on top of. Real mouse input goes to whatever is
+       topmost at that pixel, so this is the case where a click "succeeds" and
+       nothing happens — the cookie banner / chat widget / sticky header problem. -->
+  <p><a id="go-covered" href="/demo.html">Open the shop (covered)</a></p>
+  <div id="cover" style="display:none;position:fixed;left:0;right:0;top:0;height:100%;
+       background:rgba(0,0,0,.02);z-index:9999">
+    <span style="position:absolute;bottom:4px;left:4px;font:11px sans-serif">cookie bar</span>
+  </div>
+  <button id="show-cover" onclick="document.getElementById('cover').style.display='block'">
+    Show the cookie bar
+  </button>
+
+  <h2>Native drag-and-drop</h2>
+  <!-- HTML5 DnD, not a pointer gesture. The browser's drag machinery only starts
+       for REAL input, so this is the step that proves replay sends real input. -->
+  <div style="display:flex;gap:1rem;align-items:center">
+    <div id="dnd-source" draggable="true"
+         style="padding:.5rem 1rem;border:1px solid #7c3aed;border-radius:6px;cursor:grab"
+         ondragstart="event.dataTransfer.setData('text/plain', 'parcel')">parcel</div>
+    <div id="dnd-target"
+         style="padding:.5rem 1rem;border:2px dashed #ccc;border-radius:6px;min-width:120px"
+         ondragover="event.preventDefault()"
+         ondrop="event.preventDefault();
+                 document.getElementById('dnd-result').textContent =
+                   event.dataTransfer.getData('text/plain');">drop here</div>
+    <span>dropped: <b id="dnd-result">—</b></span>
+  </div>
+
+  <h2>Virtualized list</h2>
+  <!-- Rows are RECYCLED on scroll, so a recorded scrollTop points at a different
+       row on replay. Only a content anchor survives this. -->
+  <div id="virt" style="height:120px;overflow:auto;border:1px solid #ccc;border-radius:8px">
+    <div id="virt-inner"></div>
+  </div>
+  <script>
+    (function () {
+      var inner = document.getElementById("virt-inner");
+      for (var i = 0; i < 60; i++) {
+        var row = document.createElement("div");
+        row.id = "row-" + i;
+        row.setAttribute("data-row", String(i));
+        row.style.height = "30px";
+        row.textContent = "row " + i;
+        inner.appendChild(row);
+      }
+    })();
+  </script>
+
+  <h2>Download</h2>
+  <a id="download-report" download="report.csv"
+     href="data:text/csv;charset=utf-8,name%2Cvalue%0Aalpha%2C1">Download report.csv</a>
+
+  <h2>Popup</h2>
+  <!-- A second logical target. The flow records it as t1 and replay must re-bind
+       it to whatever window id it gets this run. -->
+  <button id="open-popup" onclick="window.open('/demo.html', '_blank', 'width=500,height=400')">
+    Open shop in a new tab
+  </button>
+</body>
+</html>

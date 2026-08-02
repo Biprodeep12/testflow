@@ -23,6 +23,19 @@ again and hit ↻ on the extension card.
 The dashboard's Record page detects the extension automatically and shows these same
 steps if it's missing.
 
+### Why it asks for the "debugger" permission
+
+Replay drives Chrome's Input domain so the page receives **real** events —
+`isTrusted: true`, real hover, `:focus-visible`, native scrolling. A content script
+can only `dispatchEvent()`, which no app that checks any of those will treat the same
+way, so a synthetic replay quietly proves less than it looks like it does.
+
+It is attached **during replay only**, and detached the moment the run ends.
+Recording never attaches — Chrome's "started debugging this browser" infobar would
+shrink the very viewport being measured. If attaching fails (DevTools open on that
+tab, or another debugger already there), replay falls back to synthetic events and
+labels every affected step in the run, rather than downgrading silently.
+
 ## 3. Firebase (only needed to SAVE flows)
 
 Recording works with zero configuration — steps live in the extension + dashboard
