@@ -2,9 +2,9 @@
   "name": "testflow",
   "version": "0.1.0",
   "private": true,
-  "//engines": "22.12 is a hard floor, not a preference. firebase-admin/auth eagerly requires jwks-rsa, which does a top-level require('jose') — and jose@6 is pure ESM. require() of an ESM package only works on Node >=20.19 or >=22.12 (hence jwks-rsa's own engines: ^20.19.0 || ^22.12.0 || >=23). On anything older it throws ERR_REQUIRE_ESM while the API route MODULE IS EVALUATED, so no handler runs, the JSON envelope never happens, and Next serves its HTML 500 page — while /api/health, which never imports the auth helper, keeps working. firebase-admin@14 also requires >=22 on its own. Deploy targets read this field to choose the runtime; without it a host is free to pick a Node that cannot load this dependency tree.",
+  "//engines": "22.12 is a hard floor, not a preference. firebase-admin/auth eagerly requires jwks-rsa, which does a top-level require('jose') — and jose@6 is pure ESM. require() of an ESM package only works on Node >=20.19 or >=22.12 (hence jwks-rsa's own engines: ^20.19.0 || ^22.12.0 || >= 23.0.0). On anything older it throws ERR_REQUIRE_ESM the moment the auth module is loaded, and every authenticated route 500s. firebase-admin@14 also requires >=22 on its own. Written as a bare major, NOT a range: Vercel only ships whole majors (24.x/22.x/20.x) and this is the form its docs specify, so there is nothing for a host to resolve differently than intended. .nvmrc carries the same number for hosts that read that instead. GET /api/health reports the Node version it actually got, plus whether firebase-admin/auth loaded — check there before assuming this field was honoured.",
   "engines": {
-    "node": ">=22.12.0"
+    "node": "22.x"
   },
   "scripts": {
     "dev": "next dev",
