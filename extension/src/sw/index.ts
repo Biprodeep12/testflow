@@ -9,17 +9,22 @@
  */
 
 import {
+  DEFAULT_TIMEOUT_MS,
   frameKey,
   frameSignature,
+  metaResolver,
   ROOT_TARGET,
   type AgentMessage,
   type CsToSw,
   type EnvRecord,
+  type FlowJson,
   type FlowStep,
   type FrameLink,
   type HubMessage,
   type StepMeta,
   type LocateResult,
+  type RunOptions,
+  type StepRunResult,
   type TabMode,
   type TargetId,
 } from "../shared/flow";
@@ -175,6 +180,253 @@ async function resolveFrameId(
 }
 
 /* ---------------------------------------------------------------- *
+ * Replay runs — the orchestration loop, moved here from the dashboard.
+ *
+ * WHY HERE: the dashboard tab is hidden the moment the replay tab takes focus, and
+ * Chrome throttles a hidden page's timers toward one tick per second (worse after
+ * five minutes). "As recorded" pacing ran on those timers, so it was quietly
+ * distorted — and a dashboard reload killed the run outright, because the loop's
+ * state lived in a React ref. The worker has neither problem; the dashboard is a
+ * monitor now, and rejoins a live run via the snapshot it already gets on connect.
+ * ---------------------------------------------------------------- */
+
+const RUN_KEY = "tf-run";
+/** The flow being replayed — its own key, written ONCE per run. */
+const RUN_FLOW_KEY = "tf-run-flow";
+/** One key per reported step: `tf-run-s-<index>` -> StepRunResult. */
+const RUN_STEP_PREFIX = "tf-run-s-";
+
+/** Same values the dashboard loop used — the move must not change semantics. */
+const STEP_TIMEOUT_MS = 15000;
+const CONNECT_TIMEOUT_MS = 20000;
+/** "As recorded" honours your pauses, but a coffee break shouldn't stall a run. */
+const MAX_RECORDED_PAUSE_MS = 10000;
+/** Fallback pacing for flows saved before timestamps existed. */
+const LEGACY_PAUSE_MS = 800;
+/**
+ * A recorded gap at or below this is input MECHANICS — a key held down, the
+ * spacing inside a double-click, a drag's rhythm — not think time. Both speeds
+ * preserve these gaps exactly, and deadline pacing never dispatches a step less
+ * than its mechanics floor after the previous one, even when the run is behind
+ * schedule: rushing a key-hold changes what the page sees, not just when.
+ */
+const INPUT_GAP_PRESERVED_MS = 150;
+/**
+ * Fast mode compresses think time instead of discarding it. A zero-gap replay
+ * outruns the page — debounced inputs, dropdown animations and post-click
+ * re-renders that always had time during recording suddenly have none, and
+ * steps mistarget or flake. Gaps above the mechanics threshold are scaled down
+ * and capped; execution overhead counts toward them, so on most steps the
+ * compressed pause costs nothing extra.
+ */
+const FAST_SCALE = 0.15;
+const FAST_MAX_PAUSE_MS = 600;
+/** Unstamped legacy flows get a small uniform beat in fast mode, not zero. */
+const FAST_LEGACY_PAUSE_MS = 100;
+
+/**
+ * Run bookkeeping — deliberately WITHOUT the flow or the statuses.
+ *
+ * This record is rewritten on every step report. Holding the flow in it meant
+ * each report re-serialized the entire recording (steps, sidecars, uploaded
+ * files), so the cost of running one step grew with the size of the flow and a
+ * long replay crawled — the exact quadratic the recording side already fixed by
+ * splitting steps out of the session object. Same split here: the flow is
+ * written once under RUN_FLOW_KEY, statuses go one key per step, and this
+ * record stays a constant-size write.
+ */
+type RunRecord = {
+  runId: number;
+  flowId?: string;
+  options: RunOptions;
+  /**
+   * The next step to execute. Advanced past every completed step, so a worker
+   * resumed after eviction continues where it left off and never re-runs a step
+   * that already acted — re-clicking "purchase" is not a recovery strategy.
+   */
+  index: number;
+  /** steps.length — lets snapshots pad unreported statuses without the flow */
+  total: number;
+  done: boolean;
+  error?: string;
+};
+
+async function getRun(): Promise<RunRecord | null> {
+  const data = await chrome.storage.session.get(RUN_KEY);
+  return (data[RUN_KEY] as RunRecord | undefined) ?? null;
+}
+
+async function setRun(run: RunRecord): Promise<void> {
+  await chrome.storage.session.set({ [RUN_KEY]: run });
+}
+
+async function getRunFlow(): Promise<FlowJson | null> {
+  const data = await chrome.storage.session.get(RUN_FLOW_KEY);
+  return (data[RUN_FLOW_KEY] as FlowJson | undefined) ?? null;
+}
+
+async function setRunFlow(flow: FlowJson): Promise<void> {
+  await chrome.storage.session.set({ [RUN_FLOW_KEY]: flow });
+}
+
+/** Every reported status, padded to `total` with pending. O(n) — snapshots only. */
+async function getRunStatuses(total: number): Promise<StepRunResult[]> {
+  const all = await chrome.storage.session.get(null);
+  const statuses: StepRunResult[] = Array.from({ length: total }, () => ({
+    status: "pending",
+  }));
+  for (const [key, value] of Object.entries(all)) {
+    if (!key.startsWith(RUN_STEP_PREFIX)) continue;
+    const index = Number(key.slice(RUN_STEP_PREFIX.length));
+    if (Number.isInteger(index) && index >= 0 && index < total) {
+      statuses[index] = value as StepRunResult;
+    }
+  }
+  return statuses;
+}
+
+async function clearRunStatuses(): Promise<void> {
+  const all = await chrome.storage.session.get(null);
+  const keys = Object.keys(all).filter((key) => key.startsWith(RUN_STEP_PREFIX));
+  if (keys.length > 0) await chrome.storage.session.remove(keys);
+}
+
+/**
+ * Top-frame load signals the loop waits on. TOP frame only, on purpose: an iframe
+ * announcing itself must not satisfy a navigation wait, and pairing ready/settled
+ * 1:1 per page load is what lets the settle check pass instantly on a page that
+ * finished loading before the wait started. (The dashboard's old counters counted
+ * every frame's ready against top-only settles, so on iframe-heavy pages that
+ * early-exit never held and each navigation burned the full settle timeout.)
+ *
+ * In-memory deliberately: the counts only mean anything within one worker
+ * lifetime, and a resumed run starts from a clean "nothing pending" state.
+ */
+let topReadyCount = 0;
+let topSettledCount = 0;
+let pageWake: (() => void) | null = null;
+
+function bumpPageSignal(kind: "ready" | "settled"): void {
+  if (kind === "ready") {
+    // A new top page moots the previous page's outstanding settle: that
+    // document is gone and its `load` event is never coming. Without this, one
+    // interrupted load (a JS redirect before `load` fires) left the counters
+    // permanently out of step, and EVERY later settle gate burned its full
+    // timeout — a run that "randomly" freezes after some navigation and stays
+    // slow from then on.
+    topSettledCount = Math.max(topSettledCount, topReadyCount);
+    topReadyCount++;
+  } else {
+    // Capped: a late settle from a dying page must not pre-settle the new one.
+    topSettledCount = Math.min(topSettledCount + 1, topReadyCount);
+  }
+  pageWake?.();
+  pageWake = null;
+}
+
+/**
+ * The loop's only wait primitive: a condition, woken early by page signals, with a
+ * polling backstop so a missed wake can only cost one interval, never the run.
+ */
+async function waitUntil(
+  condition: () => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    const left = deadline - Date.now();
+    if (left <= 0) return false;
+    await new Promise<void>((resolve) => {
+      pageWake = resolve;
+      setTimeout(resolve, Math.min(left, 250));
+    });
+  }
+  return true;
+}
+
+/** pathname + hash — the part of a URL a route assertion actually asserts. */
+function routeOf(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname + parsed.hash;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Waits for a step's asserted navigation to land — whichever way it lands.
+ *
+ * A hard navigation announces itself with a new top-frame cs-ready. An SPA route
+ * change NEVER does — no document is created — so a gate that only watches ready
+ * events sat out its entire timeout on every click the recorder pinned a route
+ * onto, which is most clicks in a single-page app: the "replay freezes for 15s
+ * on some steps but not others" bug. The tab's URL covers both cases, polled
+ * cheaply (no debugger) and compared as pathname+hash, exactly the way the
+ * recorded route assertions compare.
+ *
+ * A URL match alone is not enough for a HARD load: the URL commits before the
+ * new document's content script exists, and a step dispatched into that window
+ * dies with "tab did not respond". So a match must also prove the document is
+ * answerable — an SPA route's document (which never left) answers immediately;
+ * a committing hard load keeps us waiting for its cs-ready.
+ */
+async function waitAssertedNav(
+  tabId: number | undefined,
+  readyBefore: number,
+  url: string | undefined,
+  timeoutMs: number,
+): Promise<boolean> {
+  const want = routeOf(url);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (topReadyCount > readyBefore) return true; // a new document announced
+    if (want && tabId !== undefined) {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (routeOf(tab.url) === want) {
+          // Probe with a no-op message: any injected content script resolves
+          // (unknown types fall through its listener); a document with no
+          // script yet throws — that is a hard load still coming up.
+          try {
+            await chrome.tabs.sendMessage(tabId, { type: "cs-ping" }, { frameId: 0 });
+            return true; // same document, route landed — the SPA case
+          } catch {
+            /* mid-commit hard load — keep waiting for its cs-ready */
+          }
+        }
+      } catch {
+        /* tab gone mid-check — ready or the timeout will decide */
+      }
+    }
+    const left = deadline - Date.now();
+    if (left <= 0) return false;
+    await new Promise<void>((resolve) => {
+      pageWake = resolve;
+      setTimeout(resolve, Math.min(left, 150));
+    });
+  }
+}
+
+/**
+ * MV3 workers die after ~30s without events or API calls, and a run's longest
+ * quiet stretches (a recorded 10s pause, a 15s navigation wait) get close. One
+ * cheap API call under that limit keeps the worker alive exactly while a run
+ * exists; the persisted RunRecord is the backstop if it dies anyway.
+ */
+let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+function setHeartbeat(on: boolean): void {
+  if (on && !heartbeat) {
+    heartbeat = setInterval(() => void chrome.storage.session.get(RUN_KEY), 20000);
+  } else if (!on && heartbeat) {
+    clearInterval(heartbeat);
+    heartbeat = null;
+  }
+}
+
+/* ---------------------------------------------------------------- *
  * Bridge ports (dashboard tabs) — live connections, re-established by the bridge
  * content script on every dashboard load, so eviction only drops them momentarily.
  * ---------------------------------------------------------------- */
@@ -195,6 +447,17 @@ async function snapshotOf(session: Session | null): Promise<AgentMessage> {
   // O(n), but only on connect and on the rare events that amend an existing step —
   // never once per recorded step, which is what used to make long flows crawl.
   const recorded = session ? await getRecorded() : { steps: [], meta: [] };
+  const run = await getRun();
+  // Statuses reassemble O(n) from their per-step keys — connects only, never per step.
+  const liveRun =
+    run && !run.done
+      ? {
+          runId: run.runId,
+          flowId: run.flowId,
+          index: run.index,
+          statuses: await getRunStatuses(run.total),
+        }
+      : undefined;
   return {
     source: "tf-agent",
     kind: "snapshot",
@@ -203,6 +466,7 @@ async function snapshotOf(session: Session | null): Promise<AgentMessage> {
     meta: recorded.meta,
     env: session?.env,
     error: session?.storageError,
+    run: liveRun,
   };
 }
 
@@ -265,6 +529,9 @@ async function startSession(
 }
 
 async function stopSession(): Promise<void> {
+  // A stopped session takes any in-flight run with it. The loop notices `done`
+  // on its next report and halts; dashboards hear runDone either way.
+  await endRun(null, false, "the session was stopped");
   const session = await getSession();
   if (!session) return;
   await cdp.detachAll(); // release the debugger infobar the moment the run ends
@@ -520,6 +787,7 @@ async function handleHub(message: HubMessage): Promise<void> {
       return;
     case "closeReplay":
       await enqueue(async () => {
+        await endRun(null, false, "the replay was closed");
         const session = await getSession();
         if (session?.mode !== "replay") return;
         await cdp.detachAll();
@@ -529,121 +797,393 @@ async function handleHub(message: HubMessage): Promise<void> {
         await setSession(null);
       });
       return;
+    case "startReplay": {
+      const startUrl = message.flow.steps.find(
+        (step) => step.type === "navigate",
+      )?.url;
+      if (!startUrl) {
+        broadcast({
+          source: "tf-agent",
+          kind: "runDone",
+          runId: message.runId,
+          ok: false,
+          error: "this flow has no navigate step to start from",
+        });
+        return;
+      }
+      // Signals from a previous session must not satisfy this run's first waits.
+      topReadyCount = 0;
+      topSettledCount = 0;
+      await enqueue(() => startSession("replay", startUrl));
+      // The flow is written once; per-step reports never touch it again. Unreported
+      // statuses are implicitly pending, so none are written up front.
+      await clearRunStatuses();
+      await setRunFlow(message.flow);
+      await setRun({
+        runId: message.runId,
+        flowId: message.flowId,
+        options: message.options,
+        index: 0,
+        total: message.flow.steps.length,
+        done: false,
+      });
+      setHeartbeat(true);
+      // NOT awaited and NOT enqueued: the loop waits on tabs that queued tasks
+      // bind (findTarget <-> tabs.onCreated), so queueing it would deadlock — the
+      // same rule runStep always followed.
+      void runReplayLoop(message.runId);
+      return;
+    }
     case "runStep": {
-      const session = await getSession();
-      if (session?.mode !== "replay") {
-        broadcast({
-          source: "tf-agent",
-          kind: "stepResult",
-          id: message.id,
-          ok: false,
-          error: "no replay tab — Run opens one first",
-        });
-        return;
-      }
-      // Logical target -> the tab currently bound to it. Popups bind in the order
-      // the flow opened them, so "t1" is the same window it was during recording.
-      const wantTarget = message.meta?.targetId ?? ROOT_TARGET;
-      // The step that opens a popup finishes before the browser has created it, so
-      // the very next step naturally arrives too early. Wait for it rather than
-      // reporting a missing target that is about to exist.
-      const tabId = await findTarget(wantTarget, TARGET_WAIT_MS);
-      if (tabId === undefined) {
-        broadcast({
-          source: "tf-agent",
-          kind: "stepResult",
-          id: message.id,
-          ok: false,
-          error: `target ${wantTarget} is not open — the step that opens it may have failed`,
-        });
-        return;
-      }
-      // Real input where possible. Everything else (fill, scroll, waits) stays in
-      // the content script, exactly as Playwright splits it.
-      const showCursor = message.cursor !== false;
-
-      if (cdp.isAttached(tabId) && isInputStep(message.step)) {
-        const result = await runInputStep(tabId, message.step, message.meta, showCursor);
-        broadcast({ source: "tf-agent", kind: "stepResult", id: message.id, ...result });
-        return;
-      }
-
-      // Expressions go over the debugger too, because a page's CSP forbids the page
-      // from evaluating a string — and virtually every real site ships one. Only for
-      // the main frame: a subframe expression needs a context the content script has
-      // and this does not.
-      if (
-        cdp.isAttached(tabId) &&
-        message.step.type === "waitForExpression" &&
-        !message.meta?.frameChain?.length
-      ) {
-        const result = await runExpressionStep(tabId, message.step);
-        broadcast({ source: "tf-agent", kind: "stepResult", id: message.id, ...result });
-        return;
-      }
-
-      const frame = await resolveFrameId(tabId, message.meta?.frameChain);
-      if (!frame) {
-        broadcast({
-          source: "tf-agent",
-          kind: "stepResult",
-          id: message.id,
-          ok: false,
-          error: `frame ${frameSignature(message.meta?.frameChain)} never loaded in this tab`,
-        });
-        return;
-      }
-      // A step that SHOULD have been real input but could not be. Never silent: the
-      // run proves less than it appears to, and that is the user's call to make.
-      const note = isInputStep(message.step)
-        ? "synthetic events — real input was unavailable (DevTools open, or another debugger attached). Pages that check isTrusted, :focus-visible or native scrolling may behave differently."
-        : undefined;
-
-      // Steps the content script runs itself (fill, and the synthetic-input
-      // fallback) still get a cursor — resolved without side effects, since the
-      // step is about to resolve the same element and perform them properly.
-      if (showCursor && message.step.selectors?.length) {
-        const point = await pointFor(tabId, message.step, message.meta);
-        if (point) {
-          await cursor(tabId, "move", point);
-          if (isInputStep(message.step)) void cursor(tabId, "pulse");
-        }
-      }
-
-      try {
-        const result = (await chrome.tabs.sendMessage(
-          tabId,
-          {
-            type: "cs-run",
-            id: message.id,
-            step: message.step,
-            meta: message.meta,
-          },
-          { frameId: frame.frameId },
-        )) as { ok: boolean; error?: string } | undefined;
-        broadcast({
-          source: "tf-agent",
-          kind: "stepResult",
-          id: message.id,
-          ok: result?.ok ?? false,
-          error: result?.error,
-          note,
-        });
-      } catch (err) {
-        // The step navigated the page — the receiving document died before replying.
-        // The fresh page's cs-ready becomes the signal; report a soft failure the
-        // player already knows how to interpret.
-        broadcast({
-          source: "tf-agent",
-          kind: "stepResult",
-          id: message.id,
-          ok: false,
-          error: err instanceof Error ? err.message : "tab did not respond",
-        });
-      }
+      const result = await runOneStep(
+        message.step,
+        message.meta,
+        message.cursor !== false,
+        message.id,
+      );
+      broadcast({ source: "tf-agent", kind: "stepResult", id: message.id, ...result });
       return;
     }
   }
+}
+
+/**
+ * Executes one step end to end and returns its outcome — the body the runStep
+ * message always had, shared now by the run loop and the single-step message.
+ * One execution path, two callers.
+ */
+async function runOneStep(
+  step: FlowStep,
+  meta: StepMeta | undefined,
+  showCursor: boolean,
+  csRunId = 0,
+): Promise<{ ok: boolean; error?: string; note?: string }> {
+  const session = await getSession();
+  if (session?.mode !== "replay") {
+    return { ok: false, error: "no replay tab — Run opens one first" };
+  }
+  // Logical target -> the tab currently bound to it. Popups bind in the order
+  // the flow opened them, so "t1" is the same window it was during recording.
+  const wantTarget = meta?.targetId ?? ROOT_TARGET;
+  // The step that opens a popup finishes before the browser has created it, so
+  // the very next step naturally arrives too early. Wait for it rather than
+  // reporting a missing target that is about to exist.
+  const tabId = await findTarget(wantTarget, TARGET_WAIT_MS);
+  if (tabId === undefined) {
+    return {
+      ok: false,
+      error: `target ${wantTarget} is not open — the step that opens it may have failed`,
+    };
+  }
+  // Real input where possible. Everything else (fill, scroll, waits) stays in
+  // the content script, exactly as Playwright splits it.
+  if (cdp.isAttached(tabId) && isInputStep(step)) {
+    return runInputStep(tabId, step, meta, showCursor);
+  }
+
+  // Expressions go over the debugger too, because a page's CSP forbids the page
+  // from evaluating a string — and virtually every real site ships one. Only for
+  // the main frame: a subframe expression needs a context the content script has
+  // and this does not.
+  if (
+    cdp.isAttached(tabId) &&
+    step.type === "waitForExpression" &&
+    !meta?.frameChain?.length
+  ) {
+    return runExpressionStep(tabId, step);
+  }
+
+  const frame = await resolveFrameId(tabId, meta?.frameChain);
+  if (!frame) {
+    return {
+      ok: false,
+      error: `frame ${frameSignature(meta?.frameChain)} never loaded in this tab`,
+    };
+  }
+  // A step that SHOULD have been real input but could not be. Never silent: the
+  // run proves less than it appears to, and that is the user's call to make.
+  const note = isInputStep(step)
+    ? "synthetic events — real input was unavailable (DevTools open, or another debugger attached). Pages that check isTrusted, :focus-visible or native scrolling may behave differently."
+    : undefined;
+
+  // Steps the content script runs itself (fill, and the synthetic-input
+  // fallback) still get a cursor — resolved without side effects, since the
+  // step is about to resolve the same element and perform them properly.
+  if (showCursor && step.selectors?.length) {
+    const point = await pointFor(tabId, step, meta);
+    if (point) {
+      await cursor(tabId, "move", point);
+      if (isInputStep(step)) void cursor(tabId, "pulse");
+    }
+  }
+
+  try {
+    const result = (await chrome.tabs.sendMessage(
+      tabId,
+      { type: "cs-run", id: csRunId, step, meta },
+      { frameId: frame.frameId },
+    )) as { ok: boolean; error?: string } | undefined;
+    return { ok: result?.ok ?? false, error: result?.error, note };
+  } catch (err) {
+    // The step navigated the page — the receiving document died before replying.
+    // The fresh page's cs-ready becomes the signal; the loop treats this soft
+    // failure as "wait for the reload instead", exactly as the dashboard did.
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "tab did not respond",
+    };
+  }
+}
+
+/**
+ * Ends a run: marks it done, stops the keepalive, tells every dashboard.
+ * `runId: null` means "whatever run is active" — the abort path for stop/close.
+ * Idempotent: whoever gets there first wins, later calls are no-ops.
+ */
+async function endRun(
+  runId: number | null,
+  ok: boolean,
+  error?: string,
+): Promise<void> {
+  const run = await getRun();
+  if (!run || run.done) return;
+  if (runId !== null && run.runId !== runId) return;
+  run.done = true;
+  run.error = error;
+  await setRun(run);
+  setHeartbeat(false);
+  broadcast({ source: "tf-agent", kind: "runDone", runId: run.runId, ok, error });
+}
+
+/**
+ * Records a step's state and streams it to the dashboards. Returns false when
+ * the run is gone or superseded — the loop's cancellation gate, checked on every
+ * write so a stopped run halts within one step.
+ */
+async function reportStep(
+  runId: number,
+  index: number,
+  status: "running" | "pass" | "fail" | "skipped",
+  error?: string,
+  note?: string,
+): Promise<boolean> {
+  const run = await getRun();
+  if (!run || run.runId !== runId || run.done) return false;
+  // Two constant-size writes: the status under its own key, then the small
+  // bookkeeping record. Reporting a step must not cost more on a long flow.
+  await chrome.storage.session.set({
+    [RUN_STEP_PREFIX + index]: { status, error, note } satisfies StepRunResult,
+  });
+  // Advance past completed steps only — a resumed worker re-runs a step that was
+  // mid-flight, never one that already acted.
+  run.index = status === "pass" || status === "skipped" ? index + 1 : index;
+  await setRun(run);
+  broadcast({
+    source: "tf-agent",
+    kind: "runProgress",
+    runId,
+    index,
+    status,
+    error,
+    note,
+  });
+  return true;
+}
+
+/**
+ * The replay loop — the dashboard's old orchestration, moved here with its
+ * semantics intact: the skip rules, the monotonic pacing, and the three
+ * navigation cases are transplants, not redesigns.
+ */
+async function runReplayLoop(runId: number): Promise<void> {
+  const run = await getRun();
+  if (!run || run.runId !== runId || run.done) return;
+  // The flow is read once and held in memory for the whole loop — storage sees
+  // only constant-size bookkeeping from here on.
+  const flow = await getRunFlow();
+  if (!flow) {
+    await endRun(runId, false, "the run's flow is missing from storage");
+    return;
+  }
+  const { options } = run;
+  const steps = flow.steps;
+  const flowTimeout = flow.timeout ?? DEFAULT_TIMEOUT_MS;
+  const nav = steps.find((step) => step.type === "navigate");
+  const metaAt = metaResolver(flow);
+
+  // A fresh run waits for the tab it just opened; a resumed one is mid-page.
+  if (run.index === 0) {
+    if (!(await waitUntil(() => topReadyCount >= 1, CONNECT_TIMEOUT_MS))) {
+      await endRun(runId, false, "the replay tab never reported ready — was it closed?");
+      return;
+    }
+    // Let the first page finish loading (up to the flow timeout) before step one.
+    await waitUntil(() => topSettledCount >= topReadyCount, flowTimeout);
+  }
+
+  /* ---- The virtual timeline -------------------------------------------- *
+   * Both speeds pace against ABSOLUTE deadlines on a timeline computed once —
+   * never by sleeping the recorded gap after whatever the previous step cost.
+   * Gap-sleeping stacks execution overhead (locate round-trips, the cursor
+   * glide, navigation settles) ON TOP of every recorded pause, so the replay
+   * fell further behind the recording with every step: total time was the
+   * recording plus n × overhead, and long flows looked progressively slower.
+   * Against deadlines, a step that ran long simply shortens the wait before the
+   * next one — overhead is absorbed, drift cannot accumulate, and total time
+   * tracks the timeline itself.
+   *
+   * Gaps come from the MONOTONIC stamps (wall-clock moves when the system
+   * clock is corrected mid-recording; monotonic stamps cannot), clamped per
+   * mode: "recorded" keeps them whole up to the coffee-break cap, "fast"
+   * compresses think time but preserves input mechanics — see FAST_SCALE.
+   */
+  const stampAt = (i: number): number | undefined =>
+    metaAt(i)?.tMono ?? steps[i].timestamp;
+  const clampGap = (raw: number): number => {
+    const gap = Math.max(raw, 0);
+    if (options.speed === "recorded") return Math.min(gap, MAX_RECORDED_PAUSE_MS);
+    if (gap <= INPUT_GAP_PRESERVED_MS) return gap; // mechanics, kept exactly
+    return Math.min(
+      Math.max(gap * FAST_SCALE, INPUT_GAP_PRESERVED_MS),
+      FAST_MAX_PAUSE_MS,
+    );
+  };
+  /** sched[i]: when step i should fire, in ms from the timeline's origin. */
+  const sched: number[] = [];
+  /** floorMs[i]: the mechanics dwell a behind-schedule run still owes step i. */
+  const floorMs: number[] = [];
+  {
+    let acc = 0;
+    let prev: number | null = null;
+    for (let i = 0; i < steps.length; i++) {
+      const ts = stampAt(i);
+      if (typeof ts !== "number") {
+        acc +=
+          options.speed === "recorded" ? LEGACY_PAUSE_MS : FAST_LEGACY_PAUSE_MS;
+        floorMs.push(0);
+      } else {
+        if (prev !== null) {
+          acc += clampGap(ts - prev);
+          floorMs.push(Math.min(Math.max(ts - prev, 0), INPUT_GAP_PRESERVED_MS));
+        } else {
+          floorMs.push(0);
+        }
+        prev = ts;
+      }
+      sched.push(acc);
+    }
+  }
+  // "Now" corresponds to the step the loop starts at — which also re-anchors a
+  // resumed run instead of making it sleep to repay time the eviction lost.
+  const runOrigin = Date.now() - (sched[run.index] ?? 0);
+
+  for (let i = run.index; i < steps.length; i++) {
+    const step = steps[i];
+    const meta = metaAt(i);
+
+    // Opening the tab already satisfied the first navigation; a tab can't resize
+    // itself, so setViewport is informational. (Their stamps are already part of
+    // the timeline, so skipping them keeps the first real deadline honest.)
+    if (
+      step.type === "setViewport" ||
+      (step.type === "navigate" && step.url === nav?.url && i <= 1)
+    ) {
+      if (!(await reportStep(runId, i, "skipped"))) return;
+      continue;
+    }
+
+    // Deadline pacing: sleep only however much of this step's scheduled time
+    // was not already spent executing; time the run has lost is never repaid.
+    // Catching up may compress think time to zero, but every step still gets
+    // its mechanics dwell (bounded at INPUT_GAP_PRESERVED_MS) before dispatch —
+    // a rushed key-hold changes what the page sees, not just when.
+    const wait = Math.max(runOrigin + sched[i] - Date.now(), floorMs[i]);
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+
+    if (!(await reportStep(runId, i, "running"))) return;
+
+    // Per-step wait budget rides on the step itself — the native DevTools field.
+    const timedStep: FlowStep = { ...step, timeout: step.timeout ?? flowTimeout };
+    // Captured BEFORE the step fires, so a ready that lands in the same tick can
+    // never be missed. (The dashboard armed its waiter after firing — a fast
+    // same-tick load could slip past it.)
+    const readyBefore = topReadyCount;
+
+    if (step.type === "navigate") {
+      // The page unloads on navigation; the fresh page's ready is the outcome.
+      void runOneStep(timedStep, meta, options.cursor);
+      const ok = await waitUntil(() => topReadyCount > readyBefore, STEP_TIMEOUT_MS);
+      if (ok) await waitUntil(() => topSettledCount >= topReadyCount, flowTimeout);
+      const kept = await reportStep(
+        runId,
+        i,
+        ok ? "pass" : "fail",
+        ok ? undefined : "navigation timed out",
+      );
+      if (!kept) return;
+      if (!ok) {
+        await endRun(runId, false, "navigation timed out");
+        return;
+      }
+      continue;
+    }
+
+    const result = await runOneStep(timedStep, meta, options.cursor);
+    const asserted =
+      step.assertedEvents?.some((event) => event.type === "navigation") ?? false;
+    const assertedUrl = step.assertedEvents?.find(
+      (event) => event.type === "navigation",
+    )?.url;
+    // The step's tab, for the URL side of the asserted gate. One session read,
+    // asserted steps only; undefined just means the gate watches ready alone.
+    const gateTab = asserted
+      ? await findTarget(meta?.targetId ?? ROOT_TARGET, 0)
+      : undefined;
+
+    if (!result.ok && asserted) {
+      // The click killed the document before it could reply ("tab did not
+      // respond") — the reload's ready handshake (or the SPA route landing)
+      // is the real outcome.
+      const ok = await waitAssertedNav(gateTab, readyBefore, assertedUrl, STEP_TIMEOUT_MS);
+      if (ok) await waitUntil(() => topSettledCount >= topReadyCount, flowTimeout);
+      const kept = await reportStep(
+        runId,
+        i,
+        ok ? "pass" : "fail",
+        ok ? undefined : result.error,
+        result.note,
+      );
+      if (!kept) return;
+      if (!ok) {
+        await endRun(runId, false, result.error ?? "step failed");
+        return;
+      }
+      continue;
+    }
+
+    const kept = await reportStep(
+      runId,
+      i,
+      result.ok ? "pass" : "fail",
+      result.error,
+      result.note,
+    );
+    if (!kept) return;
+    if (!result.ok) {
+      await endRun(runId, false, result.error ?? "step failed");
+      return;
+    }
+
+    if (asserted) {
+      // Successful reply with a navigation still coming — a hard reload or an
+      // SPA route. Wait for whichever lands, then the settle, before the next
+      // step races a dying (or re-rendering) document.
+      await waitAssertedNav(gateTab, readyBefore, assertedUrl, STEP_TIMEOUT_MS);
+      await waitUntil(() => topSettledCount >= topReadyCount, flowTimeout);
+    }
+  }
+
+  await endRun(runId, true);
 }
 
 /* ---------------------------------------------------------------- *
@@ -838,7 +1378,9 @@ async function handleCs(
           void restoreCursor(tabId, { width: message.width, height: message.height });
         }
 
-        // Both modes: tell the dashboard a page finished loading.
+        // Both modes: tell the dashboard a page finished loading, and wake the
+        // replay loop — a top frame's ready is what its navigation waits watch.
+        if (isTopFrame) bumpPageSignal("ready");
         broadcast({
           source: "tf-agent",
           kind: "ready",
@@ -853,6 +1395,7 @@ async function handleCs(
       }
 
       if (message.type === "cs-settled") {
+        if (frameId === 0) bumpPageSignal("settled");
         broadcast({ source: "tf-agent", kind: "settled", url: message.url });
         return { ok: true };
       }
@@ -980,6 +1523,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     if (session.tabIds.length === 0) {
       // Last session tab closed = the user is done. Recording stays in storage
       // until saved or a new session starts? No — closing every tab ends it.
+      await endRun(null, false, "the replay tab was closed");
       await setSession(null);
       broadcast({ source: "tf-agent", kind: "stopped" });
     } else {
@@ -1025,3 +1569,18 @@ chrome.downloads.onCreated.addListener((item) => {
 });
 
 chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
+
+/* ---------------------------------------------------------------- *
+ * Resume: a worker evicted mid-run picks the loop back up on the next wake. The
+ * run's whole state is in storage, and `index` already points past every step
+ * that completed — nothing re-runs, nothing is lost. (The heartbeat makes
+ * eviction rare; this makes it survivable.)
+ * ---------------------------------------------------------------- */
+
+void (async () => {
+  const run = await getRun();
+  if (run && !run.done) {
+    setHeartbeat(true);
+    void runReplayLoop(run.runId);
+  }
+})();

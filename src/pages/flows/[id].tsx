@@ -1,8 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
-import { Button, Card, ErrorNote, Layout } from "@/components/Layout";
+import Link from "next/link";
+import {
+  Button,
+  Card,
+  Dot,
+  ErrorNote,
+  Layout,
+  PageHeader,
+  ProgressBar,
+  Segmented,
+  Stat,
+  Toggle,
+} from "@/components/Layout";
 import { FlowStepList, type StepStatus } from "@/components/FlowStepList";
-import { apiFetch, del } from "@/lib/client";
+import { apiFetch, del, relativeTime } from "@/lib/client";
 import { usePoll } from "@/hooks/usePoll";
 import { flowToPlaywright } from "@/codegen/fromFlow";
 import {
@@ -12,24 +24,22 @@ import {
   toBundle,
   type AgentMessage,
   type FlowDoc,
-  type FlowStep,
   type HubMessage,
-  type StepMeta,
 } from "@/types/flow";
 
 type View = "steps" | "json" | "playwright";
 type RunState = "idle" | "connecting" | "running" | "done";
 type Speed = "fast" | "recorded";
 
-const STEP_TIMEOUT_MS = 15000;
+/**
+ * How long to wait for the extension to acknowledge a run before concluding it
+ * is not installed. The run itself is orchestrated by the extension's service
+ * worker — this page only starts it and renders the progress it streams back.
+ * The loop cannot live here: this tab is hidden the moment the replay tab takes
+ * focus, and Chrome throttles a hidden page's timers, which distorted "as
+ * recorded" pacing and killed runs on reload.
+ */
 const CONNECT_TIMEOUT_MS = 20000;
-/** "As recorded" honours your pauses, but a coffee break shouldn't stall a run. */
-const MAX_RECORDED_PAUSE_MS = 10000;
-/** Fallback pacing for flows saved before timestamps existed. */
-const LEGACY_PAUSE_MS = 800;
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
 
 function sendHub(message: HubMessage): void {
   window.postMessage(message, window.location.origin);
@@ -52,15 +62,14 @@ export default function FlowPage() {
   // Steps that ran, but not as recorded — e.g. synthetic events because real input
   // was unavailable. Shown, never swallowed.
   const [stepNotes, setStepNotes] = useState<(string | undefined)[]>([]);
-  // Resolvers the message listener completes: ready/settled handshakes + step results.
-  const waiters = useRef<{
-    ready?: () => void;
-    settled?: () => void;
-    /** counters de-race settle: `load` may fire before the waiter is armed */
-    readyCount: number;
-    settledCount: number;
-    result: Map<number, (r: { ok: boolean; error?: string; note?: string }) => void>;
-  }>({ readyCount: 0, settledCount: 0, result: new Map() });
+  // The run this page started (or rejoined). Events for any other run are
+  // ignored, so a stale runDone from a superseded run can't clobber a new one.
+  const runIdRef = useRef<number | null>(null);
+  // True once any step reported — decides whether an aborted run shows results.
+  const sawProgress = useRef(false);
+  // Armed at start, cleared by the first word about the run; firing means the
+  // extension never answered — almost always "not installed".
+  const connectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -75,99 +84,66 @@ export default function FlowPage() {
 
   usePoll(load, null, id);
 
-  // One listener for the whole replay conversation, relayed by the extension bridge.
+  // The run lives in the extension's service worker; this listener only renders
+  // what it streams back — and rejoins a live run after a page reload.
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window) return;
       const data = event.data as AgentMessage | undefined;
       if (!data || data.source !== "tf-agent") return;
-      if (data.kind === "ready") {
-        waiters.current.readyCount++;
-        waiters.current.ready?.();
-        waiters.current.ready = undefined;
-      }
-      if (data.kind === "settled") {
-        waiters.current.settledCount++;
-        waiters.current.settled?.();
-        waiters.current.settled = undefined;
-      }
-      if (data.kind === "stepResult") {
-        const resolve = waiters.current.result.get(data.id);
-        if (resolve) {
-          waiters.current.result.delete(data.id);
-          resolve({ ok: data.ok, error: data.error, note: data.note });
+
+      if (data.kind === "snapshot") {
+        // A run is live in the worker and this page knows nothing of it — a
+        // dashboard reload mid-run. Adopt its id and statuses and keep watching.
+        if (
+          data.run &&
+          runIdRef.current === null &&
+          (!data.run.flowId || data.run.flowId === id)
+        ) {
+          runIdRef.current = data.run.runId;
+          sawProgress.current = true;
+          setRunState("running");
+          setStatuses(data.run.statuses.map((s) => s.status));
+          setStepErrors(data.run.statuses.map((s) => s.error));
+          setStepNotes(data.run.statuses.map((s) => s.note));
         }
+        return;
+      }
+
+      if (data.kind === "runProgress") {
+        if (runIdRef.current === null || data.runId !== runIdRef.current) return;
+        if (connectTimer.current) {
+          clearTimeout(connectTimer.current);
+          connectTimer.current = null;
+        }
+        sawProgress.current = true;
+        setRunState((state) => (state === "connecting" ? "running" : state));
+        setStatuses((prev) => prev.map((s, i) => (i === data.index ? data.status : s)));
+        setStepErrors((prev) => prev.map((e, i) => (i === data.index ? data.error : e)));
+        setStepNotes((prev) => prev.map((n, i) => (i === data.index ? data.note : n)));
+        return;
+      }
+
+      if (data.kind === "runDone") {
+        if (runIdRef.current === null || data.runId !== runIdRef.current) return;
+        if (connectTimer.current) {
+          clearTimeout(connectTimer.current);
+          connectTimer.current = null;
+        }
+        runIdRef.current = null;
+        // A run that never reported a step (the tab never opened) has no results
+        // worth a verdict card — return to idle with the error alone.
+        setRunState(sawProgress.current ? "done" : "idle");
+        if (data.error) setError(data.error);
       }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, []);
+  }, [id]);
 
-  const waitReady = (timeoutMs: number) =>
-    new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
-        waiters.current.ready = undefined;
-        resolve(false);
-      }, timeoutMs);
-      waiters.current.ready = () => {
-        clearTimeout(timer);
-        resolve(true);
-      };
-    });
-
-  /**
-   * After a navigation/redirect: give the page up to the flow's timeout (default 5s)
-   * to fully load before the next step. Resolves early the moment `load` fires — a
-   * state-tied wait, not a fixed sleep — and applies in BOTH speeds.
-   */
-  const waitSettled = (timeoutMs: number) =>
-    new Promise<void>((resolve) => {
-      // The latest page already reported full load — nothing to wait for.
-      if (waiters.current.settledCount >= waiters.current.readyCount) {
-        resolve();
-        return;
-      }
-      const timer = setTimeout(() => {
-        waiters.current.settled = undefined;
-        resolve();
-      }, timeoutMs);
-      waiters.current.settled = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-    });
-
-  const sendStep = (
-    stepId: number,
-    step: FlowStep,
-    meta?: StepMeta,
-    withCursor = true,
-  ) =>
-    new Promise<{ ok: boolean; error?: string; note?: string }>((resolve) => {
-      const timer = setTimeout(() => {
-        waiters.current.result.delete(stepId);
-        resolve({ ok: false, error: `no response after ${STEP_TIMEOUT_MS / 1000}s` });
-      }, STEP_TIMEOUT_MS);
-      waiters.current.result.set(stepId, (result) => {
-        clearTimeout(timer);
-        resolve(result);
-      });
-      // meta carries the tab and frame the step was recorded in — the extension
-      // routes to exactly that frame instead of broadcasting and racing.
-      sendHub({
-        source: "tf-hub",
-        kind: "runStep",
-        id: stepId,
-        step,
-        meta,
-        cursor: withCursor,
-      });
-    });
-
-  const runInTab = async () => {
+  const runInTab = () => {
     if (!flow) return;
-    const steps = flow.steps;
-    const nav = steps.find((step) => step.type === "navigate");
+    const nav = flow.steps.find((step) => step.type === "navigate");
     if (!nav?.url) {
       setError("This flow has no navigate step to start from.");
       return;
@@ -175,126 +151,51 @@ export default function FlowPage() {
 
     setError(null);
     setRunState("connecting");
-    setStatuses(steps.map(() => "pending"));
-    setStepErrors(steps.map(() => undefined));
-    setStepNotes(steps.map(() => undefined));
+    setStatuses(flow.steps.map(() => "pending"));
+    setStepErrors(flow.steps.map(() => undefined));
+    setStepNotes(flow.steps.map(() => undefined));
 
-    // The extension opens the tab in replay mode; the first cs-ready is our go.
-    waiters.current.readyCount = 0;
-    waiters.current.settledCount = 0;
-    const flowTimeout = flow.timeout ?? DEFAULT_TIMEOUT_MS;
-    const readyPromise = waitReady(CONNECT_TIMEOUT_MS);
-    sendHub({ source: "tf-hub", kind: "openForReplay", url: nav.url });
-    const connected = await readyPromise;
-    if (!connected) {
-      setError(
-        "The extension never reported the tab ready. Is the TestFlow extension loaded? (chrome://extensions → Load unpacked → extension/dist)",
-      );
+    const runId = Date.now();
+    runIdRef.current = runId;
+    sawProgress.current = false;
+    // The whole flow crosses the bridge once; the worker runs it and streams
+    // progress back. Speed and cursor ride along — they are run inputs now.
+    sendHub({
+      source: "tf-hub",
+      kind: "startReplay",
+      runId,
+      flowId: flow.id,
+      flow: {
+        title: flow.title,
+        steps: flow.steps,
+        timeout: flow.timeout,
+        env: flow.env,
+        meta: flow.meta,
+      },
+      options: { speed, cursor: showCursor },
+    });
+
+    if (connectTimer.current) clearTimeout(connectTimer.current);
+    connectTimer.current = setTimeout(() => {
+      connectTimer.current = null;
+      if (runIdRef.current !== runId) return;
+      runIdRef.current = null;
       setRunState("idle");
-      return;
-    }
-    // Let the first page finish loading (up to the flow timeout) before step one.
-    await waitSettled(flowTimeout);
-
-    setRunState("running");
-    const mark = (index: number, status: StepStatus, message?: string) => {
-      setStatuses((previous) =>
-        previous.map((s, i) => (i === index ? status : s)),
+      setError(
+        "The extension never picked up the run. Is the TestFlow extension loaded? (chrome://extensions → Load unpacked → extension/dist)",
       );
-      if (message) {
-        setStepErrors((previous) =>
-          previous.map((e, i) => (i === index ? message : e)),
-        );
-      }
-    };
-
-    // "As recorded": wait the same gap you left between interactions while
-    // recording (capped), so timing-sensitive UI (debounces, animations,
-    // dropdowns) behaves like it did for you.
-    let previousTs: number | null = null;
-    /**
-     * Paced on the MONOTONIC stamp when the flow has one. Wall-clock timestamps
-     * move when the system clock is corrected mid-recording, which silently turns a
-     * 200ms gap into a negative one; performance-based stamps cannot.
-     */
-    const stampOf = (index: number): number | undefined =>
-      flow.meta?.[index]?.tMono ?? steps[index].timestamp;
-    const paceFor = (index: number): number => {
-      const ts = stampOf(index);
-      if (typeof ts !== "number") return speed === "recorded" ? LEGACY_PAUSE_MS : 0;
-      const gap = previousTs === null ? 0 : ts - previousTs;
-      previousTs = ts;
-      if (speed !== "recorded") return 0;
-      return Math.min(Math.max(gap, 0), MAX_RECORDED_PAUSE_MS);
-    };
-
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i];
-
-      // Opening the tab already satisfied the first navigation; a tab can't
-      // resize itself, so setViewport is informational.
-      if (
-        step.type === "setViewport" ||
-        (step.type === "navigate" && step.url === nav.url && i <= 1)
-      ) {
-        // Skipped steps still anchor the clock so the first real step's gap is honest.
-        const stamp = flow.meta?.[i]?.tMono ?? step.timestamp;
-        if (typeof stamp === "number") previousTs = stamp;
-        mark(i, "skipped");
-        continue;
-      }
-
-      const pause = paceFor(i);
-      if (pause > 0) await sleep(pause);
-
-      mark(i, "running");
-      // Per-step wait budget rides on the step itself — the native DevTools field.
-      const timedStep: FlowStep = { ...step, timeout: step.timeout ?? flowTimeout };
-      const stepMeta = flow.meta?.[i];
-
-      if (step.type === "navigate") {
-        // The page unloads on navigation; the fresh page's ready is the outcome.
-        void sendStep(i, timedStep, stepMeta, showCursor);
-        const ok = await waitReady(STEP_TIMEOUT_MS);
-        if (ok) await waitSettled(flowTimeout); // redirect settle — both speeds
-        mark(i, ok ? "pass" : "fail", ok ? undefined : "navigation timed out");
-        if (!ok) break;
-        continue;
-      }
-
-      const result = await sendStep(i, timedStep, stepMeta, showCursor);
-      if (result.note) {
-        setStepNotes((previous) =>
-          previous.map((n, index) => (index === i ? result.note : n)),
-        );
-      }
-
-      if (!result.ok && step.assertedEvents?.some((e) => e.type === "navigation")) {
-        // The click killed the document before it could reply ("tab did not
-        // respond") — the reload's ready handshake is the real outcome.
-        const ok = await waitReady(STEP_TIMEOUT_MS);
-        if (ok) await waitSettled(flowTimeout);
-        mark(i, ok ? "pass" : "fail", ok ? undefined : result.error);
-        if (!ok) break;
-        continue;
-      }
-
-      mark(i, result.ok ? "pass" : "fail", result.error);
-      if (!result.ok) break;
-
-      if (step.assertedEvents?.some((e) => e.type === "navigation")) {
-        // Successful reply with a navigation still coming — wait for the reload
-        // AND its full settle before the next step races a dying document.
-        await waitReady(STEP_TIMEOUT_MS);
-        await waitSettled(flowTimeout);
-      }
-    }
-
-    setRunState("done");
+    }, CONNECT_TIMEOUT_MS);
   };
 
   const stopRun = () => {
+    // closeReplay aborts the worker-side run before closing its tabs; dropping
+    // our runId first means the resulting runDone is ignored as stale.
     sendHub({ source: "tf-hub", kind: "closeReplay" });
+    if (connectTimer.current) {
+      clearTimeout(connectTimer.current);
+      connectTimer.current = null;
+    }
+    runIdRef.current = null;
     setRunState("idle");
   };
 
@@ -346,121 +247,225 @@ export default function FlowPage() {
     return (
       <Layout title="Flow">
         <ErrorNote message={error} />
-        <p className="text-sm text-zinc-500">Loading…</p>
+        <div className="space-y-3">
+          <div className="tf-shimmer h-6 w-64 rounded bg-zinc-100 text-zinc-400 dark:bg-zinc-900" />
+          <div className="tf-shimmer h-3.5 w-96 rounded bg-zinc-100 text-zinc-400 dark:bg-zinc-900" />
+          <div className="tf-shimmer mt-5 h-64 rounded-lg bg-zinc-100 text-zinc-400 dark:bg-zinc-900" />
+        </div>
       </Layout>
     );
   }
 
+  const busy = runState === "running" || runState === "connecting";
   const passed = statuses.filter((s) => s === "pass").length;
   const failed = statuses.filter((s) => s === "fail").length;
+  const skipped = statuses.filter((s) => s === "skipped").length;
+  // Settled = every step that will not change again. Drives the progress bar.
+  const settled = passed + failed + skipped;
+  const runningIndex = statuses.findIndex((s) => s === "running");
 
   return (
-    <Layout title={flow.title}>
-      <ErrorNote message={error} />
-
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="truncate text-2xl font-semibold tracking-tight">
-            {flow.title}
-          </h1>
-          <p className="mt-1 truncate font-mono text-sm text-zinc-500">
-            {flow.sourceUrl}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-1.5 text-sm text-zinc-600 dark:text-zinc-400">
-            Speed
-            <select
-              value={speed}
-              onChange={(event) => setSpeed(event.target.value as Speed)}
-              disabled={runState === "running" || runState === "connecting"}
-              className="rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm outline-none dark:border-zinc-700 dark:bg-zinc-950"
-              title="As recorded replays with the same pauses you left between interactions (capped at 10s)"
-            >
-              <option value="fast">Fast</option>
-              <option value="recorded">As recorded</option>
-            </select>
-          </label>
-          <label
-            className="flex items-center gap-1.5 text-sm text-zinc-600 dark:text-zinc-400"
+    <Layout
+      title={flow.title}
+      actions={
+        <>
+          <Segmented<Speed>
+            value={speed}
+            onChange={setSpeed}
+            disabled={busy}
+            label="Replay speed"
+            options={[
+              {
+                value: "fast",
+                label: "Fast",
+                title:
+                  "Compresses your pauses: input timing (key holds, double-click spacing) is kept exactly, think time is scaled down.",
+              },
+              {
+                value: "recorded",
+                label: "As recorded",
+                title:
+                  "Keeps every pause you left, capped at 10s. Both speeds pace against deadlines, so a slow page never snowballs the run.",
+              },
+            ]}
+          />
+          <Toggle
+            checked={showCursor}
+            onChange={setShowCursor}
+            disabled={busy}
+            label="Cursor"
             title="Glides a visible pointer to each target before acting. Adds a moment per step."
-          >
-            <input
-              type="checkbox"
-              checked={showCursor}
-              onChange={(event) => setShowCursor(event.target.checked)}
-              disabled={runState === "running" || runState === "connecting"}
-              className="h-4 w-4 rounded border-zinc-300 dark:border-zinc-700"
-            />
-            Cursor
-          </label>
-          {runState === "running" || runState === "connecting" ? (
+          />
+          {busy ? (
             <Button variant="danger" onClick={stopRun}>
               Stop
             </Button>
           ) : (
             <Button onClick={runInTab}>Run in tab</Button>
           )}
-          <Button variant="secondary" onClick={downloadBundle} title="Full recording — what `npm run flow` replays">
+        </>
+      }
+    >
+      <PageHeader
+        eyebrow={
+          <span className="flex items-center gap-1.5">
+            <Link
+              href="/flows"
+              className="transition-colors hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              Flows
+            </Link>
+            <span className="text-zinc-300 dark:text-zinc-700">/</span>
+          </span>
+        }
+        title={flow.title}
+        description={
+          <a
+            href={flow.sourceUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="truncate font-mono text-[12px] text-zinc-500 underline decoration-zinc-300 underline-offset-4 hover:text-zinc-900 dark:decoration-zinc-700 dark:hover:text-zinc-100"
+          >
+            {flow.sourceUrl}
+          </a>
+        }
+      />
+
+      <ErrorNote message={error} />
+
+      {/* Flow facts, and the exports that act on them. */}
+      <div className="mt-5 flex flex-wrap items-center gap-x-7 gap-y-3 rounded-lg border border-zinc-200 px-3.5 py-2.5 dark:border-zinc-800">
+        <Stat label="Steps" value={flow.steps.length} />
+        <Stat
+          label="Timeout"
+          value={`${(flow.timeout ?? DEFAULT_TIMEOUT_MS) / 1000}s`}
+        />
+        <Stat label="Updated" value={relativeTime(flow.updatedAt)} />
+        <Stat
+          label="Viewport"
+          value={
+            flow.env ? (
+              `${flow.env.viewport.width}×${flow.env.viewport.height}`
+            ) : (
+              <span className="text-zinc-400">—</span>
+            )
+          }
+        />
+        <span className="flex-1" />
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={downloadBundle}
+            title="Full recording — what `npm run flow` replays"
+          >
             Download bundle
           </Button>
-          <Button variant="secondary" onClick={download} title="Interoperable Chrome DevTools Recorder JSON">
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={download}
+            title="Interoperable Chrome DevTools Recorder JSON"
+          >
             Download JSON
           </Button>
-          <Button variant="danger" onClick={remove}>
+          <Button size="sm" variant="danger" onClick={remove}>
             Delete
           </Button>
         </div>
       </div>
 
-      {runState === "connecting" && (
-        <Card className="mt-4 p-4 text-sm text-zinc-600 dark:text-zinc-400">
-          Opening a replay tab through the extension…
-        </Card>
-      )}
-      {runState === "done" && (
-        <Card
-          className={`mt-4 p-4 text-sm font-medium ${
-            failed === 0
-              ? "text-emerald-700 dark:text-emerald-300"
-              : "text-red-700 dark:text-red-300"
-          }`}
-        >
-          {failed === 0
-            ? `✓ All ${passed} steps passed`
-            : `✗ Failed — ${passed} passed, ${failed} failed`}
+      {runState !== "idle" && (
+        <Card className="mt-3 overflow-hidden">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-3.5 py-2.5">
+            {runState === "connecting" && (
+              <span className="flex items-center gap-2 text-[13px] text-zinc-500">
+                <Dot tone="warning" live />
+                Opening replay tab…
+              </span>
+            )}
+            {runState === "running" && (
+              <span className="flex items-center gap-2 text-[13px] font-medium">
+                <Dot tone="active" live />
+                {runningIndex >= 0
+                  ? `Step ${runningIndex + 1} of ${flow.steps.length}`
+                  : "Running"}
+              </span>
+            )}
+            {runState === "done" && (
+              <span
+                className={`flex items-center gap-2 text-[13px] font-medium ${
+                  failed === 0
+                    ? "text-emerald-700 dark:text-emerald-400"
+                    : "text-red-700 dark:text-red-400"
+                }`}
+              >
+                <Dot tone={failed === 0 ? "success" : "danger"} />
+                {failed === 0
+                  ? `${passed} passed`
+                  : `${failed} failed, ${passed} passed`}
+              </span>
+            )}
+            <span className="flex-1" />
+            <div className="flex items-center gap-3 font-mono text-[11px] text-zinc-500">
+              {passed > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <Dot tone="success" /> {passed}
+                </span>
+              )}
+              {failed > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <Dot tone="danger" /> {failed}
+                </span>
+              )}
+              {skipped > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <Dot /> {skipped} skipped
+                </span>
+              )}
+            </div>
+          </div>
+          <ProgressBar
+            value={flow.steps.length ? settled / flow.steps.length : 0}
+            tone={failed > 0 ? "danger" : runState === "done" ? "success" : "active"}
+          />
         </Card>
       )}
 
-      <div className="mt-6 flex gap-1">
-        {(["steps", "json", "playwright"] as View[]).map((v) => (
-          <button
-            key={v}
-            onClick={() => setView(v)}
-            className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
-              view === v
-                ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-            }`}
-          >
-            {v === "steps" ? "Steps" : v === "json" ? "JSON" : "Playwright"}
-          </button>
-        ))}
+      <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+        <Segmented<View>
+          value={view}
+          onChange={setView}
+          label="View"
+          options={[
+            { value: "steps", label: "Steps" },
+            { value: "json", label: "JSON" },
+            { value: "playwright", label: "Playwright" },
+          ]}
+        />
+        {view !== "steps" && (
+          <span className="text-xs text-zinc-500">
+            {view === "json"
+              ? "Byte-compatible with Chrome DevTools Recorder."
+              : "Generated from the steps and their sidecars."}
+          </span>
+        )}
       </div>
 
       <Card className="mt-3 overflow-hidden">
         {view === "steps" && (
-          <div className="max-h-160 overflow-y-auto">
+          <div className="tf-scroll max-h-160 overflow-y-auto">
             <FlowStepList
               steps={flow.steps}
               statuses={runState === "idle" ? undefined : statuses}
               errors={stepErrors}
               notes={stepNotes}
+              meta={flow.meta}
             />
           </div>
         )}
         {view === "json" && (
-          <pre className="max-h-160 overflow-auto p-4 font-mono text-xs leading-5">
+          <pre className="tf-scroll max-h-160 overflow-auto p-4 font-mono text-xs leading-5">
             {JSON.stringify(
               {
                 title: flow.title,
@@ -473,7 +478,7 @@ export default function FlowPage() {
           </pre>
         )}
         {view === "playwright" && (
-          <pre className="max-h-160 overflow-auto p-4 font-mono text-xs leading-5">
+          <pre className="tf-scroll max-h-160 overflow-auto p-4 font-mono text-xs leading-5">
             {flowToPlaywright({
               title: flow.title,
               steps: flow.steps,

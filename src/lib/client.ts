@@ -1,12 +1,44 @@
 /** Browser-side fetch helper: unwraps the API envelope, throws a usable message. */
 
+/**
+ * Supplies the current Firebase ID token, or null when auth is not configured.
+ *
+ * Injected by AuthProvider rather than imported, so this module — which every
+ * page uses — pulls in no Firebase code when auth is switched off, and the
+ * request path stays honest about being optional.
+ */
+type TokenProvider = () => Promise<string | null>;
+
+let tokenProvider: TokenProvider | null = null;
+
+export function setTokenProvider(provider: TokenProvider | null): void {
+  tokenProvider = provider;
+}
+
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  // Asked for per request: tokens expire hourly, and a cached one is exactly
+  // the bug that logs you out mid-recording.
+  let auth: Record<string, string> = {};
+  if (tokenProvider) {
+    try {
+      const token = await tokenProvider();
+      if (token) auth = { authorization: `Bearer ${token}` };
+    } catch {
+      // Token refresh failed (offline, revoked). Send the request bare and let
+      // the server's 401 produce a message, rather than failing silently here.
+    }
+  }
+
   const response = await fetch(path, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "content-type": "application/json",
+      ...auth,
+      ...(init?.headers ?? {}),
+    },
   });
 
   const payload = (await response.json().catch(() => null)) as

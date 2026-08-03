@@ -1,6 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
-import { Button, Card, ErrorNote, Layout } from "@/components/Layout";
+import {
+  AuthConfigNote,
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  Dot,
+  EmptyState,
+  ErrorNote,
+  Field,
+  Input,
+  Layout,
+  PageHeader,
+} from "@/components/Layout";
 import { FlowStepList } from "@/components/FlowStepList";
 import { post } from "@/lib/client";
 import {
@@ -23,6 +36,15 @@ function defaultTitle(): string {
 
 function sendHub(message: HubMessage): void {
   window.postMessage(message, window.location.origin);
+}
+
+/** Inline code — commands and paths, so they are copyable by eye. */
+function Mono({ children }: { children: React.ReactNode }) {
+  return (
+    <code className="rounded border border-zinc-200 px-1 font-mono text-[12px] text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">
+      {children}
+    </code>
+  );
 }
 
 export default function RecordPage() {
@@ -186,66 +208,73 @@ export default function RecordPage() {
   ).length;
 
   return (
-    <Layout>
-      <h1 className="text-2xl font-semibold tracking-tight">Record a flow</h1>
-      <p className="mt-1 text-sm text-zinc-500">
-        The extension opens the site in a new tab and records every interaction —
-        any site, across navigations. Nothing is stored until you save.
-      </p>
+    <Layout
+      actions={
+        extensionReady !== null && (
+          <Badge tone={extensionReady ? "success" : "warning"}>
+            <Dot tone={extensionReady ? "success" : "warning"} />
+            {extensionReady ? "extension ready" : "no extension"}
+          </Badge>
+        )
+      }
+    >
+      <PageHeader
+        title="Record a flow"
+        description="The extension opens the URL in a new tab and captures every interaction — across navigations, iframes and popups. Nothing is stored until you save."
+      />
 
+      <AuthConfigNote />
       <ErrorNote message={error} />
 
       {extensionReady === false && (
-        <Card className="mt-6 border-amber-300 p-5 text-sm dark:border-amber-900/60">
-          <h2 className="font-semibold text-amber-700 dark:text-amber-300">
-            Extension not detected
+        <Card className="mt-5 p-4">
+          <h2 className="flex items-center gap-2 text-[13px] font-medium">
+            <Dot tone="warning" />
+            Extension not loaded
           </h2>
-          <ol className="mt-2 list-decimal space-y-1 pl-5 text-zinc-600 dark:text-zinc-400">
+          <ol className="mt-2.5 space-y-1 text-[13px] text-zinc-500 dark:text-zinc-400">
             <li>
-              Build it once: <code className="font-mono">npm run build:ext</code>
+              1. <Mono>npm run build:ext</Mono>
             </li>
             <li>
-              Open <code className="font-mono">chrome://extensions</code>, enable
-              Developer mode
+              2. <Mono>chrome://extensions</Mono> → enable Developer mode
             </li>
             <li>
-              <b>Load unpacked</b> → select{" "}
-              <code className="font-mono">extension/dist</code>
+              3. Load unpacked → <Mono>extension/dist</Mono>
             </li>
-            <li>Reload this page</li>
+            <li>4. Reload this page</li>
           </ol>
         </Card>
       )}
 
       {phase === "form" && (
-        <Card className="mt-6 p-6">
-          <form onSubmit={start} className="flex flex-col gap-4">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-sm font-medium">Website URL</span>
-              <input
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://example.com"
-                required
-                className="rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-sm outline-none focus:border-zinc-900 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:border-zinc-300"
-              />
-            </label>
-            <div className="flex items-center gap-3">
-              <Button type="submit" disabled={extensionReady !== true}>
-                Start Session
-              </Button>
+        <Card className="mt-5 p-4">
+          <form onSubmit={start} className="flex flex-col gap-3">
+            <Field label="Target URL">
+              <div className="flex gap-2">
+                <Input
+                  value={url}
+                  onChange={setUrl}
+                  placeholder="https://example.com"
+                  required
+                  mono
+                  className="flex-1"
+                />
+                <Button type="submit" disabled={extensionReady !== true}>
+                  Start Session
+                </Button>
+              </div>
+            </Field>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
               <button
                 type="button"
-                onClick={() =>
-                  setUrl(`${window.location.origin}/demo.html`)
-                }
-                className="text-xs text-zinc-500 underline-offset-2 hover:underline"
+                onClick={() => setUrl(`${window.location.origin}/demo.html`)}
+                className="underline underline-offset-4 hover:text-zinc-900 dark:hover:text-zinc-100"
               >
-                try the demo page
+                use the demo page
               </button>
-              <span className="text-xs text-zinc-500">
-                You can also hit ⏺ Record in the extension popup on any tab.
-              </span>
+              <span className="text-zinc-300 dark:text-zinc-700">·</span>
+              <span>Or hit Record in the extension popup on any tab.</span>
             </div>
           </form>
         </Card>
@@ -253,48 +282,52 @@ export default function RecordPage() {
 
       {phase !== "form" && (
         <>
-          <div className="mt-6 flex flex-wrap items-center gap-3">
-            {phase === "waiting" && (
-              <span className="flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
-                Opening the tab…
-              </span>
-            )}
-            {phase === "recording" && (
-              <span className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
-                Recording — interact with the tab
-              </span>
-            )}
-            {phase === "stopped" && (
-              <span className="text-sm font-medium text-zinc-500">■ Stopped</span>
-            )}
-            <span
-              data-testid="tf-step-count"
-              className="rounded-full bg-zinc-100 px-2.5 py-1 font-mono text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
-            >
-              {steps.length} steps
-            </span>
-            <span className="flex-1" />
-            {phase !== "stopped" && (
-              <Button variant="danger" onClick={stop}>
-                Stop recording
-              </Button>
-            )}
+          {/* Sticky: Stop must stay reachable however far the step list has
+              scrolled — a recording left running keeps capturing. */}
+          <div className="sticky top-12 z-30 -mx-5 mt-5 border-y border-zinc-200 bg-white px-5 py-2 dark:border-zinc-800 dark:bg-[#0b0b0d]">
+            <div className="flex flex-wrap items-center gap-3">
+              {phase === "waiting" && (
+                <span className="flex items-center gap-2 text-[13px] text-zinc-500">
+                  <Dot tone="warning" live />
+                  Opening tab…
+                </span>
+              )}
+              {phase === "recording" && (
+                <span className="flex items-center gap-2 text-[13px] font-medium">
+                  <Dot tone="danger" live />
+                  Recording
+                </span>
+              )}
+              {phase === "stopped" && (
+                <span className="flex items-center gap-2 text-[13px] text-zinc-500">
+                  <Dot />
+                  Stopped
+                </span>
+              )}
+              <Badge testId="tf-step-count">{steps.length} steps</Badge>
+              {interactionCount > 0 && (
+                <span className="font-mono text-[11px] text-zinc-500">
+                  {interactionCount} interaction{interactionCount === 1 ? "" : "s"}
+                </span>
+              )}
+              <span className="flex-1" />
+              {phase !== "stopped" && (
+                <Button variant="danger" onClick={stop}>
+                  Stop recording
+                </Button>
+              )}
+            </div>
           </div>
 
           {phase === "stopped" && (
-            <Card className="mt-4 p-5">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-                <label className="flex flex-1 flex-col gap-1.5">
-                  <span className="text-sm font-medium">Flow name</span>
-                  <input
-                    value={title}
-                    onChange={(event) => setTitle(event.target.value)}
-                    className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-900 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:border-zinc-300"
-                  />
-                </label>
-                <div className="flex gap-2">
+            <Card className="mt-5 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+                <div className="flex-1">
+                  <Field label="Flow name">
+                    <Input value={title} onChange={setTitle} />
+                  </Field>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
                   <Button onClick={save} disabled={saving || interactionCount === 0}>
                     {saving ? "Saving…" : "Save flow"}
                   </Button>
@@ -304,32 +337,41 @@ export default function RecordPage() {
                   <Button variant="secondary" onClick={download}>
                     Download JSON
                   </Button>
-                  <Button variant="secondary" onClick={discard}>
+                  <Button variant="ghost" onClick={discard}>
                     Discard
                   </Button>
                 </div>
               </div>
               {interactionCount === 0 && (
-                <p className="mt-3 text-xs text-zinc-500">
-                  No interactions were recorded — nothing worth saving yet.
+                <p className="mt-2 text-xs text-zinc-500">
+                  No interactions recorded — nothing to save.
                 </p>
               )}
             </Card>
           )}
 
-          <Card className="mt-4 overflow-hidden">
-            <div className="border-b border-zinc-100 px-5 py-3 dark:border-zinc-800">
-              <h2 className="text-sm font-semibold">Steps</h2>
-            </div>
+          <Card className="mt-5 overflow-hidden">
+            <CardHeader
+              title="Steps"
+              right={
+                phase === "recording" ? (
+                  <span className="flex items-center gap-1.5 font-mono text-[11px] text-zinc-500">
+                    <Dot tone="danger" live />
+                    live
+                  </span>
+                ) : undefined
+              }
+            />
             {steps.length === 0 ? (
-              <p className="px-6 py-12 text-center text-sm text-zinc-500">
-                Nothing yet — interact with the opened tab.
-              </p>
+              <EmptyState
+                title="No steps yet"
+                hint="Interact with the opened tab — clicks, typing, scrolling and navigations land here as they happen."
+              />
             ) : (
-              <div className="max-h-128 overflow-y-auto">
+              <div className="tf-scroll max-h-128 overflow-y-auto">
                 {/* Live view: this re-renders on every captured step, so the drawn
                     list is bounded. The recording keeps everything. */}
-                <FlowStepList steps={steps} maxRendered={150} />
+                <FlowStepList steps={steps} meta={meta} maxRendered={150} />
                 <div ref={bottom} />
               </div>
             )}

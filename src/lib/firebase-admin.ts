@@ -43,15 +43,20 @@ export class FirebaseNotConfiguredError extends Error {
   }
 }
 
-export function getDb(): Firestore {
-  if (globalCache.__testflowDb) return globalCache.__testflowDb;
+/**
+ * The initialised Admin app — shared by Firestore and by ID-token verification.
+ *
+ * Both need the same credentials and the same singleton; initialising twice is
+ * what produces "app already exists" on hot reload.
+ */
+export function adminApp(): App {
+  if (globalCache.__testflowFirebaseApp) return globalCache.__testflowFirebaseApp;
 
   const { configured, missing } = firebaseConfigStatus();
   if (!configured) throw new FirebaseNotConfiguredError(missing);
 
   const app =
-    globalCache.__testflowFirebaseApp ??
-    (getApps().length > 0
+    getApps().length > 0
       ? getApps()[0]
       : initializeApp({
           credential: cert({
@@ -59,8 +64,16 @@ export function getDb(): Firestore {
             clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
             privateKey: readPrivateKey(),
           }),
-        }));
+        });
 
+  globalCache.__testflowFirebaseApp = app;
+  return app;
+}
+
+export function getDb(): Firestore {
+  if (globalCache.__testflowDb) return globalCache.__testflowDb;
+
+  const app = adminApp();
   const db = getFirestore(app);
   try {
     db.settings({ ignoreUndefinedProperties: true });
@@ -68,7 +81,6 @@ export function getDb(): Firestore {
     // settings() throws if the instance has already been used — harmless on hot reload.
   }
 
-  globalCache.__testflowFirebaseApp = app;
   globalCache.__testflowDb = db;
   return db;
 }

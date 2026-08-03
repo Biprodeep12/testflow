@@ -1,26 +1,138 @@
 @import "tailwindcss";
 
+/* ------------------------------------------------------------------ *
+ * Theme.
+ *
+ * `dark:` is driven by a CLASS, not by prefers-color-scheme, because the theme
+ * is now a user choice with three states (light / dark / follow the system).
+ * The media query still decides what "system" MEANS — it is read once in the
+ * boot script in _document and resolved to a class, so there is exactly one
+ * source of truth at paint time.
+ * ------------------------------------------------------------------ */
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans:
+    var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono:
+    var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+  --tf-bg: #ffffff;
+  --tf-fg: #18181b;
+  --tf-scroll-thumb: #d4d4d8;
+  --tf-focus: #52525b;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+.dark {
+  color-scheme: dark;
+  --tf-bg: #0b0b0d;
+  --tf-fg: #ededf0;
+  --tf-scroll-thumb: #3f3f46;
+  --tf-focus: #a1a1aa;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--tf-bg);
+  color: var(--tf-fg);
+  font-family: var(--font-sans);
+  /* Slightly tighter than browser default: this is a dense tool UI, and the
+     default 16px/normal rhythm wastes a row of steps per screen. */
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+::selection {
+  background: color-mix(in oklab, currentColor 18%, transparent);
+}
+
+/* Keyboard focus, once, everywhere. No border-radius here — the outline already
+   follows each element's own radius, and setting one would reshape pills and
+   switches the moment they take focus. */
+:focus-visible {
+  outline: 1.5px solid var(--tf-focus);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ *
+ * Scrollbars — the step lists are tall scroll regions on every page, and the
+ * default full-width bar visually cuts the panel in half.
+ * ------------------------------------------------------------------ */
+
+.tf-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--tf-scroll-thumb) transparent;
+}
+
+.tf-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.tf-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tf-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--tf-scroll-thumb);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 9999px;
+}
+
+/* ------------------------------------------------------------------ *
+ * Motion — used only where it carries information: something is live, or
+ * something just arrived. Nothing decorative.
+ * ------------------------------------------------------------------ */
+
+@keyframes tf-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* "This is happening right now" — recording, and the step being executed. */
+.tf-live {
+  animation: tf-blink 1.2s steps(1, end) infinite;
+}
+
+@keyframes tf-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.tf-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, currentColor 8%, transparent) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: tf-shimmer 1.4s linear infinite;
+}
+
+/* Respect the user's setting — and note the recorder captures this too
+   (EnvRecord.reducedMotion), because it changes how the page under test
+   behaves as well. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

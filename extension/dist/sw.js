@@ -2,6 +2,20 @@
 (() => {
   // src/types/flow.ts
   var MAX_UPLOAD_BYTES = 256 * 1024;
+  function metaResolver(flow) {
+    const byId = /* @__PURE__ */ new Map();
+    for (const meta of flow.meta ?? []) {
+      if (typeof meta.stepId === "number") byId.set(meta.stepId, meta);
+    }
+    return (index) => {
+      const id = flow.steps[index]?.id;
+      if (typeof id === "number") {
+        const hit = byId.get(id);
+        if (hit) return hit;
+      }
+      return flow.meta?.[index];
+    };
+  }
   var ROOT_TARGET = "t0";
   function frameKey(chain) {
     return (chain ?? []).map((link) => link.index).join("/");
@@ -9,6 +23,7 @@
   function frameSignature(chain) {
     return (chain ?? []).map((link) => link.selectors?.[0]?.[0] ?? `#${link.index}`).join(" >>> ");
   }
+  var DEFAULT_TIMEOUT_MS = 5e3;
 
   // extension/src/sw/cdp.ts
   var PROTOCOL_VERSION = "1.3";
@@ -239,6 +254,119 @@
     if (byIndex) return { frameId: byIndex.frameId, how: "index" };
     return null;
   }
+  var RUN_KEY = "tf-run";
+  var RUN_FLOW_KEY = "tf-run-flow";
+  var RUN_STEP_PREFIX = "tf-run-s-";
+  var STEP_TIMEOUT_MS = 15e3;
+  var CONNECT_TIMEOUT_MS = 2e4;
+  var MAX_RECORDED_PAUSE_MS = 1e4;
+  var LEGACY_PAUSE_MS = 800;
+  var INPUT_GAP_PRESERVED_MS = 150;
+  var FAST_SCALE = 0.15;
+  var FAST_MAX_PAUSE_MS = 600;
+  var FAST_LEGACY_PAUSE_MS = 100;
+  async function getRun() {
+    const data = await chrome.storage.session.get(RUN_KEY);
+    return data[RUN_KEY] ?? null;
+  }
+  async function setRun(run) {
+    await chrome.storage.session.set({ [RUN_KEY]: run });
+  }
+  async function getRunFlow() {
+    const data = await chrome.storage.session.get(RUN_FLOW_KEY);
+    return data[RUN_FLOW_KEY] ?? null;
+  }
+  async function setRunFlow(flow) {
+    await chrome.storage.session.set({ [RUN_FLOW_KEY]: flow });
+  }
+  async function getRunStatuses(total) {
+    const all = await chrome.storage.session.get(null);
+    const statuses = Array.from({ length: total }, () => ({
+      status: "pending"
+    }));
+    for (const [key2, value] of Object.entries(all)) {
+      if (!key2.startsWith(RUN_STEP_PREFIX)) continue;
+      const index = Number(key2.slice(RUN_STEP_PREFIX.length));
+      if (Number.isInteger(index) && index >= 0 && index < total) {
+        statuses[index] = value;
+      }
+    }
+    return statuses;
+  }
+  async function clearRunStatuses() {
+    const all = await chrome.storage.session.get(null);
+    const keys = Object.keys(all).filter((key2) => key2.startsWith(RUN_STEP_PREFIX));
+    if (keys.length > 0) await chrome.storage.session.remove(keys);
+  }
+  var topReadyCount = 0;
+  var topSettledCount = 0;
+  var pageWake = null;
+  function bumpPageSignal(kind) {
+    if (kind === "ready") {
+      topSettledCount = Math.max(topSettledCount, topReadyCount);
+      topReadyCount++;
+    } else {
+      topSettledCount = Math.min(topSettledCount + 1, topReadyCount);
+    }
+    pageWake?.();
+    pageWake = null;
+  }
+  async function waitUntil(condition, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (!condition()) {
+      const left = deadline - Date.now();
+      if (left <= 0) return false;
+      await new Promise((resolve) => {
+        pageWake = resolve;
+        setTimeout(resolve, Math.min(left, 250));
+      });
+    }
+    return true;
+  }
+  function routeOf(url) {
+    if (!url) return null;
+    try {
+      const parsed = new URL(url);
+      return parsed.pathname + parsed.hash;
+    } catch {
+      return null;
+    }
+  }
+  async function waitAssertedNav(tabId, readyBefore, url, timeoutMs) {
+    const want = routeOf(url);
+    const deadline = Date.now() + timeoutMs;
+    for (; ; ) {
+      if (topReadyCount > readyBefore) return true;
+      if (want && tabId !== void 0) {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (routeOf(tab.url) === want) {
+            try {
+              await chrome.tabs.sendMessage(tabId, { type: "cs-ping" }, { frameId: 0 });
+              return true;
+            } catch {
+            }
+          }
+        } catch {
+        }
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) return false;
+      await new Promise((resolve) => {
+        pageWake = resolve;
+        setTimeout(resolve, Math.min(left, 150));
+      });
+    }
+  }
+  var heartbeat = null;
+  function setHeartbeat(on) {
+    if (on && !heartbeat) {
+      heartbeat = setInterval(() => void chrome.storage.session.get(RUN_KEY), 2e4);
+    } else if (!on && heartbeat) {
+      clearInterval(heartbeat);
+      heartbeat = null;
+    }
+  }
   var bridges = /* @__PURE__ */ new Set();
   function broadcast(message) {
     for (const port of bridges) {
@@ -251,6 +379,13 @@
   }
   async function snapshotOf(session) {
     const recorded = session ? await getRecorded() : { steps: [], meta: [] };
+    const run = await getRun();
+    const liveRun = run && !run.done ? {
+      runId: run.runId,
+      flowId: run.flowId,
+      index: run.index,
+      statuses: await getRunStatuses(run.total)
+    } : void 0;
     return {
       source: "tf-agent",
       kind: "snapshot",
@@ -258,7 +393,8 @@
       steps: recorded.steps,
       meta: recorded.meta,
       env: session?.env,
-      error: session?.storageError
+      error: session?.storageError,
+      run: liveRun
     };
   }
   async function broadcastSnapshot(session) {
@@ -303,6 +439,7 @@
     });
   }
   async function stopSession() {
+    await endRun(null, false, "the session was stopped");
     const session = await getSession();
     if (!session) return;
     await detachAll();
@@ -467,6 +604,7 @@
         return;
       case "closeReplay":
         await enqueue(async () => {
+          await endRun(null, false, "the replay was closed");
           const session = await getSession();
           if (session?.mode !== "replay") return;
           await detachAll();
@@ -477,91 +615,249 @@
           await setSession(null);
         });
         return;
+      case "startReplay": {
+        const startUrl = message.flow.steps.find(
+          (step) => step.type === "navigate"
+        )?.url;
+        if (!startUrl) {
+          broadcast({
+            source: "tf-agent",
+            kind: "runDone",
+            runId: message.runId,
+            ok: false,
+            error: "this flow has no navigate step to start from"
+          });
+          return;
+        }
+        topReadyCount = 0;
+        topSettledCount = 0;
+        await enqueue(() => startSession("replay", startUrl));
+        await clearRunStatuses();
+        await setRunFlow(message.flow);
+        await setRun({
+          runId: message.runId,
+          flowId: message.flowId,
+          options: message.options,
+          index: 0,
+          total: message.flow.steps.length,
+          done: false
+        });
+        setHeartbeat(true);
+        void runReplayLoop(message.runId);
+        return;
+      }
       case "runStep": {
-        const session = await getSession();
-        if (session?.mode !== "replay") {
-          broadcast({
-            source: "tf-agent",
-            kind: "stepResult",
-            id: message.id,
-            ok: false,
-            error: "no replay tab \u2014 Run opens one first"
-          });
-          return;
-        }
-        const wantTarget = message.meta?.targetId ?? ROOT_TARGET;
-        const tabId = await findTarget(wantTarget, TARGET_WAIT_MS);
-        if (tabId === void 0) {
-          broadcast({
-            source: "tf-agent",
-            kind: "stepResult",
-            id: message.id,
-            ok: false,
-            error: `target ${wantTarget} is not open \u2014 the step that opens it may have failed`
-          });
-          return;
-        }
-        const showCursor = message.cursor !== false;
-        if (isAttached(tabId) && isInputStep(message.step)) {
-          const result = await runInputStep(tabId, message.step, message.meta, showCursor);
-          broadcast({ source: "tf-agent", kind: "stepResult", id: message.id, ...result });
-          return;
-        }
-        if (isAttached(tabId) && message.step.type === "waitForExpression" && !message.meta?.frameChain?.length) {
-          const result = await runExpressionStep(tabId, message.step);
-          broadcast({ source: "tf-agent", kind: "stepResult", id: message.id, ...result });
-          return;
-        }
-        const frame = await resolveFrameId(tabId, message.meta?.frameChain);
-        if (!frame) {
-          broadcast({
-            source: "tf-agent",
-            kind: "stepResult",
-            id: message.id,
-            ok: false,
-            error: `frame ${frameSignature(message.meta?.frameChain)} never loaded in this tab`
-          });
-          return;
-        }
-        const note = isInputStep(message.step) ? "synthetic events \u2014 real input was unavailable (DevTools open, or another debugger attached). Pages that check isTrusted, :focus-visible or native scrolling may behave differently." : void 0;
-        if (showCursor && message.step.selectors?.length) {
-          const point = await pointFor(tabId, message.step, message.meta);
-          if (point) {
-            await cursor(tabId, "move", point);
-            if (isInputStep(message.step)) void cursor(tabId, "pulse");
-          }
-        }
-        try {
-          const result = await chrome.tabs.sendMessage(
-            tabId,
-            {
-              type: "cs-run",
-              id: message.id,
-              step: message.step,
-              meta: message.meta
-            },
-            { frameId: frame.frameId }
-          );
-          broadcast({
-            source: "tf-agent",
-            kind: "stepResult",
-            id: message.id,
-            ok: result?.ok ?? false,
-            error: result?.error,
-            note
-          });
-        } catch (err) {
-          broadcast({
-            source: "tf-agent",
-            kind: "stepResult",
-            id: message.id,
-            ok: false,
-            error: err instanceof Error ? err.message : "tab did not respond"
-          });
-        }
+        const result = await runOneStep(
+          message.step,
+          message.meta,
+          message.cursor !== false,
+          message.id
+        );
+        broadcast({ source: "tf-agent", kind: "stepResult", id: message.id, ...result });
         return;
       }
     }
+  }
+  async function runOneStep(step, meta, showCursor, csRunId = 0) {
+    const session = await getSession();
+    if (session?.mode !== "replay") {
+      return { ok: false, error: "no replay tab \u2014 Run opens one first" };
+    }
+    const wantTarget = meta?.targetId ?? ROOT_TARGET;
+    const tabId = await findTarget(wantTarget, TARGET_WAIT_MS);
+    if (tabId === void 0) {
+      return {
+        ok: false,
+        error: `target ${wantTarget} is not open \u2014 the step that opens it may have failed`
+      };
+    }
+    if (isAttached(tabId) && isInputStep(step)) {
+      return runInputStep(tabId, step, meta, showCursor);
+    }
+    if (isAttached(tabId) && step.type === "waitForExpression" && !meta?.frameChain?.length) {
+      return runExpressionStep(tabId, step);
+    }
+    const frame = await resolveFrameId(tabId, meta?.frameChain);
+    if (!frame) {
+      return {
+        ok: false,
+        error: `frame ${frameSignature(meta?.frameChain)} never loaded in this tab`
+      };
+    }
+    const note = isInputStep(step) ? "synthetic events \u2014 real input was unavailable (DevTools open, or another debugger attached). Pages that check isTrusted, :focus-visible or native scrolling may behave differently." : void 0;
+    if (showCursor && step.selectors?.length) {
+      const point = await pointFor(tabId, step, meta);
+      if (point) {
+        await cursor(tabId, "move", point);
+        if (isInputStep(step)) void cursor(tabId, "pulse");
+      }
+    }
+    try {
+      const result = await chrome.tabs.sendMessage(
+        tabId,
+        { type: "cs-run", id: csRunId, step, meta },
+        { frameId: frame.frameId }
+      );
+      return { ok: result?.ok ?? false, error: result?.error, note };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : "tab did not respond"
+      };
+    }
+  }
+  async function endRun(runId, ok, error) {
+    const run = await getRun();
+    if (!run || run.done) return;
+    if (runId !== null && run.runId !== runId) return;
+    run.done = true;
+    run.error = error;
+    await setRun(run);
+    setHeartbeat(false);
+    broadcast({ source: "tf-agent", kind: "runDone", runId: run.runId, ok, error });
+  }
+  async function reportStep(runId, index, status, error, note) {
+    const run = await getRun();
+    if (!run || run.runId !== runId || run.done) return false;
+    await chrome.storage.session.set({
+      [RUN_STEP_PREFIX + index]: { status, error, note }
+    });
+    run.index = status === "pass" || status === "skipped" ? index + 1 : index;
+    await setRun(run);
+    broadcast({
+      source: "tf-agent",
+      kind: "runProgress",
+      runId,
+      index,
+      status,
+      error,
+      note
+    });
+    return true;
+  }
+  async function runReplayLoop(runId) {
+    const run = await getRun();
+    if (!run || run.runId !== runId || run.done) return;
+    const flow = await getRunFlow();
+    if (!flow) {
+      await endRun(runId, false, "the run's flow is missing from storage");
+      return;
+    }
+    const { options } = run;
+    const steps = flow.steps;
+    const flowTimeout = flow.timeout ?? DEFAULT_TIMEOUT_MS;
+    const nav = steps.find((step) => step.type === "navigate");
+    const metaAt = metaResolver(flow);
+    if (run.index === 0) {
+      if (!await waitUntil(() => topReadyCount >= 1, CONNECT_TIMEOUT_MS)) {
+        await endRun(runId, false, "the replay tab never reported ready \u2014 was it closed?");
+        return;
+      }
+      await waitUntil(() => topSettledCount >= topReadyCount, flowTimeout);
+    }
+    const stampAt = (i) => metaAt(i)?.tMono ?? steps[i].timestamp;
+    const clampGap = (raw) => {
+      const gap = Math.max(raw, 0);
+      if (options.speed === "recorded") return Math.min(gap, MAX_RECORDED_PAUSE_MS);
+      if (gap <= INPUT_GAP_PRESERVED_MS) return gap;
+      return Math.min(
+        Math.max(gap * FAST_SCALE, INPUT_GAP_PRESERVED_MS),
+        FAST_MAX_PAUSE_MS
+      );
+    };
+    const sched = [];
+    const floorMs = [];
+    {
+      let acc = 0;
+      let prev = null;
+      for (let i = 0; i < steps.length; i++) {
+        const ts = stampAt(i);
+        if (typeof ts !== "number") {
+          acc += options.speed === "recorded" ? LEGACY_PAUSE_MS : FAST_LEGACY_PAUSE_MS;
+          floorMs.push(0);
+        } else {
+          if (prev !== null) {
+            acc += clampGap(ts - prev);
+            floorMs.push(Math.min(Math.max(ts - prev, 0), INPUT_GAP_PRESERVED_MS));
+          } else {
+            floorMs.push(0);
+          }
+          prev = ts;
+        }
+        sched.push(acc);
+      }
+    }
+    const runOrigin = Date.now() - (sched[run.index] ?? 0);
+    for (let i = run.index; i < steps.length; i++) {
+      const step = steps[i];
+      const meta = metaAt(i);
+      if (step.type === "setViewport" || step.type === "navigate" && step.url === nav?.url && i <= 1) {
+        if (!await reportStep(runId, i, "skipped")) return;
+        continue;
+      }
+      const wait = Math.max(runOrigin + sched[i] - Date.now(), floorMs[i]);
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      if (!await reportStep(runId, i, "running")) return;
+      const timedStep = { ...step, timeout: step.timeout ?? flowTimeout };
+      const readyBefore = topReadyCount;
+      if (step.type === "navigate") {
+        void runOneStep(timedStep, meta, options.cursor);
+        const ok = await waitUntil(() => topReadyCount > readyBefore, STEP_TIMEOUT_MS);
+        if (ok) await waitUntil(() => topSettledCount >= topReadyCount, flowTimeout);
+        const kept2 = await reportStep(
+          runId,
+          i,
+          ok ? "pass" : "fail",
+          ok ? void 0 : "navigation timed out"
+        );
+        if (!kept2) return;
+        if (!ok) {
+          await endRun(runId, false, "navigation timed out");
+          return;
+        }
+        continue;
+      }
+      const result = await runOneStep(timedStep, meta, options.cursor);
+      const asserted = step.assertedEvents?.some((event) => event.type === "navigation") ?? false;
+      const assertedUrl = step.assertedEvents?.find(
+        (event) => event.type === "navigation"
+      )?.url;
+      const gateTab = asserted ? await findTarget(meta?.targetId ?? ROOT_TARGET, 0) : void 0;
+      if (!result.ok && asserted) {
+        const ok = await waitAssertedNav(gateTab, readyBefore, assertedUrl, STEP_TIMEOUT_MS);
+        if (ok) await waitUntil(() => topSettledCount >= topReadyCount, flowTimeout);
+        const kept2 = await reportStep(
+          runId,
+          i,
+          ok ? "pass" : "fail",
+          ok ? void 0 : result.error,
+          result.note
+        );
+        if (!kept2) return;
+        if (!ok) {
+          await endRun(runId, false, result.error ?? "step failed");
+          return;
+        }
+        continue;
+      }
+      const kept = await reportStep(
+        runId,
+        i,
+        result.ok ? "pass" : "fail",
+        result.error,
+        result.note
+      );
+      if (!kept) return;
+      if (!result.ok) {
+        await endRun(runId, false, result.error ?? "step failed");
+        return;
+      }
+      if (asserted) {
+        await waitAssertedNav(gateTab, readyBefore, assertedUrl, STEP_TIMEOUT_MS);
+        await waitUntil(() => topSettledCount >= topReadyCount, flowTimeout);
+      }
+    }
+    await endRun(runId, true);
   }
   var queue = Promise.resolve();
   function enqueue(work) {
@@ -673,6 +969,7 @@
       if (session.mode === "replay" && isTopFrame) {
         void restoreCursor(tabId, { width: message.width, height: message.height });
       }
+      if (isTopFrame) bumpPageSignal("ready");
       broadcast({
         source: "tf-agent",
         kind: "ready",
@@ -686,6 +983,7 @@
       return { ok: true };
     }
     if (message.type === "cs-settled") {
+      if (frameId === 0) bumpPageSignal("settled");
       broadcast({ source: "tf-agent", kind: "settled", url: message.url });
       return { ok: true };
     }
@@ -775,6 +1073,7 @@
       session.tabIds = session.tabIds.filter((id) => id !== tabId);
       delete session.targets[tabId];
       if (session.tabIds.length === 0) {
+        await endRun(null, false, "the replay tab was closed");
         await setSession(null);
         broadcast({ source: "tf-agent", kind: "stopped" });
       } else {
@@ -804,4 +1103,11 @@
     });
   });
   chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
+  void (async () => {
+    const run = await getRun();
+    if (run && !run.done) {
+      setHeartbeat(true);
+      void runReplayLoop(run.runId);
+    }
+  })();
 })();

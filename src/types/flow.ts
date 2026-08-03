@@ -414,6 +414,22 @@ export type FlowDoc = FlowJson & {
  * needs the extension id — the bridge only runs on the dashboard's own origin.
  * ------------------------------------------------------------------ */
 
+/** How a service-worker-driven run executes. */
+export type RunOptions = {
+  /** "recorded" honours the pauses you left between interactions (capped) */
+  speed: "fast" | "recorded";
+  /** glide a visible cursor to each target before acting */
+  cursor: boolean;
+};
+
+/** One step's state in a service-worker-driven run. */
+export type StepRunResult = {
+  status: "pending" | "running" | "pass" | "fail" | "skipped";
+  error?: string;
+  /** ran, but not as recorded (e.g. synthetic events) — shown, never swallowed */
+  note?: string;
+};
+
 /** extension -> dashboard page */
 export type AgentMessage =
   | { source: "tf-agent"; kind: "bridge-ready" }
@@ -445,6 +461,36 @@ export type AgentMessage =
        * because it looks complete and replays as something the user never did.
        */
       error?: string;
+      /**
+       * A service-worker-driven replay in flight. Sent on every (re)connect, which
+       * is what lets a dashboard that reloaded mid-run rejoin it live instead of
+       * losing it — the run itself never lived in the page.
+       */
+      run?: {
+        runId: number;
+        /** the flow doc being replayed, so an unrelated flow page ignores it */
+        flowId?: string;
+        index: number;
+        statuses: StepRunResult[];
+      };
+    }
+  | {
+      source: "tf-agent";
+      /** one step of a service-worker-driven run changed state */
+      kind: "runProgress";
+      runId: number;
+      index: number;
+      status: "running" | "pass" | "fail" | "skipped";
+      error?: string;
+      note?: string;
+    }
+  | {
+      source: "tf-agent";
+      /** a service-worker-driven run ended — completed, failed, or aborted */
+      kind: "runDone";
+      runId: number;
+      ok: boolean;
+      error?: string;
     }
   | { source: "tf-agent"; kind: "stopped" }
   | {
@@ -473,6 +519,26 @@ export type HubMessage =
   | { source: "tf-hub"; kind: "openAndRecord"; url: string }
   | { source: "tf-hub"; kind: "stop" }
   | { source: "tf-hub"; kind: "openForReplay"; url: string }
+  | {
+      source: "tf-hub";
+      /**
+       * Run a whole flow, orchestrated by the service worker. The flow crosses the
+       * bridge once; the dashboard then only observes runProgress/runDone.
+       *
+       * The loop must not live in a page: the dashboard tab is hidden the moment
+       * the replay tab takes focus, and Chrome throttles a hidden page's timers —
+       * which distorted "as recorded" pacing and made every timeout late. The
+       * worker is not throttled, and a run also survives a dashboard reload (the
+       * page rejoins via the snapshot's `run`).
+       */
+      kind: "startReplay";
+      /** minted by the dashboard so it can tell its own run's events apart */
+      runId: number;
+      /** the flow doc id, echoed in snapshots so other flow pages ignore the run */
+      flowId?: string;
+      flow: FlowJson;
+      options: RunOptions;
+    }
   | {
       source: "tf-hub";
       kind: "runStep";

@@ -58,6 +58,45 @@ them. No composite indexes needed.
 
 ---
 
+## 4. Sign-in (optional)
+
+Leave this out and the dashboard runs **unauthenticated**: no sign-in screen, and
+every flow is visible to anyone who can reach the server. That is the right default
+for `localhost`, and it is what keeps `npm run e2e` runnable.
+
+Turn it on and each recording is owned by the account that saved it.
+
+1. **Build → Authentication → Get started**, then enable **Google** and/or
+   **Email/Password** under *Sign-in method*. The sign-in screen offers both; enable
+   whichever you want to use.
+2. **⚙ Project settings → General → Your apps →** add a **Web app** if you have none,
+   then copy three values from its config into `.env.local`:
+
+```
+NEXT_PUBLIC_FIREBASE_API_KEY=…
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=your-project
+```
+
+3. Restart `npm run dev` — `NEXT_PUBLIC_*` values are baked in at build time.
+
+**All three or none.** They gate the browser *and* the server from one signal, so a
+partial set would leave the client sending tokens nobody checks. Set some but not all
+and the Record page says so.
+
+These three values are public by design — they identify the project, they do not
+grant access. What protects data is the server verifying the ID token on every
+request and your Firestore rules.
+
+**Existing flows are not lost.** Recordings saved before you turned auth on have no
+owner, and they stay readable by any signed-in user — the alternative would look
+exactly like data loss. Everything saved afterwards is owned.
+
+The theme (light / dark / follow the OS) is a per-browser setting in the header; it
+has nothing to do with auth.
+
+---
+
 ## Using it
 
 1. **Record** page → enter a URL → **Start Session**. The extension opens the site in

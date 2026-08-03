@@ -18,6 +18,8 @@ import type { EnvRecord, FlowDoc, FlowStep, StepMeta } from "@/types/flow";
 type StoredFlow = Omit<FlowDoc, "id" | "steps" | "meta"> & {
   stepsJson: string;
   metaJson?: string;
+  /** owner. "local" for flows saved while auth was switched off. */
+  uid?: string;
 };
 
 export function flowsRef() {
@@ -28,6 +30,7 @@ export function toStored(
   flow: Omit<FlowDoc, "id" | "steps" | "meta"> & {
     steps: FlowStep[];
     meta?: StepMeta[];
+    uid?: string;
   },
 ): StoredFlow {
   const { steps, meta, ...rest } = flow;
