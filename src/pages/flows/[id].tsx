@@ -267,6 +267,7 @@ export default function FlowPage() {
   return (
     <Layout
       title={flow.title}
+      signal={busy ? "run" : null}
       actions={
         <>
           <Segmented<Speed>

@@ -209,6 +209,7 @@ export default function RecordPage() {
 
   return (
     <Layout
+      signal={phase === "recording" || phase === "waiting" ? "record" : null}
       actions={
         extensionReady !== null && (
           <Badge tone={extensionReady ? "success" : "warning"}>
@@ -248,23 +249,36 @@ export default function RecordPage() {
       )}
 
       {phase === "form" && (
-        <Card className="mt-5 p-4">
-          <form onSubmit={start} className="flex flex-col gap-3">
-            <Field label="Target URL">
-              <div className="flex gap-2">
-                <Input
+        <Card className="tf-rise mt-5 overflow-hidden">
+          <CardHeader title="New session" />
+          <form onSubmit={start} className="flex flex-col gap-3 p-4">
+            {/*
+              A command bar rather than a labelled field: the URL is the input
+              to an instrument, and the engraved prefix carries the label so the
+              row reads as one control instead of a form.
+            */}
+            <div className="flex gap-2">
+              <div className="flex h-9 flex-1 items-center rounded-md border border-zinc-200 bg-white transition-colors focus-within:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-950 dark:focus-within:border-zinc-600">
+                <span className="tf-label shrink-0 self-center border-r border-zinc-200 px-2.5 py-1 text-zinc-400 dark:border-zinc-800 dark:text-zinc-600">
+                  URL
+                </span>
+                <input
                   value={url}
-                  onChange={setUrl}
+                  onChange={(event) => setUrl(event.target.value)}
                   placeholder="https://example.com"
                   required
-                  mono
-                  className="flex-1"
+                  aria-label="Target URL"
+                  className="h-full min-w-0 flex-1 bg-transparent px-2.5 font-mono text-[13px] outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
                 />
-                <Button type="submit" disabled={extensionReady !== true}>
-                  Start Session
-                </Button>
               </div>
-            </Field>
+              <Button
+                type="submit"
+                disabled={extensionReady !== true}
+                className="h-9 px-4"
+              >
+                Start Session
+              </Button>
+            </div>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
               <button
                 type="button"
@@ -284,7 +298,7 @@ export default function RecordPage() {
         <>
           {/* Sticky: Stop must stay reachable however far the step list has
               scrolled — a recording left running keeps capturing. */}
-          <div className="sticky top-12 z-30 -mx-5 mt-5 border-y border-zinc-200 bg-white px-5 py-2 dark:border-zinc-800 dark:bg-[#0b0b0d]">
+          <div className="sticky top-12.5 z-30 -mx-5 mt-5 border-y border-zinc-200 bg-(--tf-bg)/92 px-5 py-2 backdrop-blur-sm dark:border-zinc-800/90">
             <div className="flex flex-wrap items-center gap-3">
               {phase === "waiting" && (
                 <span className="flex items-center gap-2 text-[13px] text-zinc-500">

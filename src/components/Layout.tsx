@@ -129,13 +129,18 @@ export function Card({
 }) {
   return (
     <div
-      className={`rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950 ${className}`}
+      className={`rounded-lg border border-zinc-200 bg-white dark:border-zinc-800/90 dark:bg-zinc-950/70 ${className}`}
     >
       {children}
     </div>
   );
 }
 
+/**
+ * Panel header: a silkscreen label, a rail of ruler ticks filling the dead
+ * space, then whatever the panel wants on the right. The ticks are what stop
+ * an empty strip from reading as unfinished — they are the instrument face.
+ */
 export function CardHeader({
   title,
   right,
@@ -144,10 +149,12 @@ export function CardHeader({
   right?: ReactNode;
 }) {
   return (
-    <div className="flex h-9 items-center justify-between gap-3 border-b border-zinc-200 px-3 dark:border-zinc-800">
-      <h2 className="text-[11px] font-medium tracking-wider text-zinc-500 uppercase">
-        {title}
-      </h2>
+    <div className="flex h-9 items-center gap-3 border-b border-zinc-200 px-3 dark:border-zinc-800/90">
+      <h2 className="tf-label shrink-0 text-zinc-500">{title}</h2>
+      <span
+        aria-hidden="true"
+        className="tf-ticks h-1.5 min-w-6 flex-1 text-zinc-300 opacity-40 dark:text-zinc-700"
+      />
       {right}
     </div>
   );
@@ -167,10 +174,19 @@ export function PageHeader({
   return (
     <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
       <div className="min-w-0 flex-1">
-        {eyebrow && <div className="mb-1 text-xs text-zinc-500">{eyebrow}</div>}
-        <h1 className="truncate text-lg font-semibold tracking-tight">{title}</h1>
+        {eyebrow && (
+          <div className="tf-label mb-2 text-zinc-400 dark:text-zinc-600">
+            {eyebrow}
+          </div>
+        )}
+        {/* Tight and large: the one place the type is allowed to be loud.
+            Leading stays above 1 — `truncate` clips overflow, and leading-none
+            cuts the descenders off titles like "Recording…". */}
+        <h1 className="truncate text-[26px] leading-[1.15] font-semibold tracking-[-0.03em]">
+          {title}
+        </h1>
         {description && (
-          <div className="mt-1 max-w-2xl text-[13px] text-zinc-500 dark:text-zinc-400">
+          <div className="mt-2.5 max-w-2xl text-[13px] leading-relaxed text-zinc-500 dark:text-zinc-400">
             {description}
           </div>
         )}
@@ -368,14 +384,18 @@ export function ProgressBar({
   );
 }
 
-/** A labelled value. Data is mono so columns of them line up. */
+/**
+ * An instrument readout: the value large in mono, the engraved label under it.
+ * Value first because that is what you came to read; the label only has to be
+ * findable once.
+ */
 export function Stat({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div className="flex flex-col gap-0.5">
-      <span className="text-[11px] tracking-wider text-zinc-500 uppercase">
-        {label}
+    <div className="flex flex-col gap-1">
+      <span className="font-mono text-[17px] leading-none tracking-tight tabular-nums">
+        {value}
       </span>
-      <span className="font-mono text-[13px] tabular-nums">{value}</span>
+      <span className="tf-label text-zinc-400 dark:text-zinc-600">{label}</span>
     </div>
   );
 }
@@ -664,11 +684,19 @@ export function Layout({
   children,
   title,
   actions,
+  signal,
 }: {
   children: ReactNode;
   title?: string;
   /** header-right slot — connection state, page-level controls */
   actions?: ReactNode;
+  /**
+   * The device's status lamp, as a rail across the top of the chrome.
+   * "record" blinks red; "run" is a steady ink line. Visible from anywhere on
+   * the page, including behind a scrolled step list — a session you forgot is
+   * running is the failure mode this exists to prevent.
+   */
+  signal?: "record" | "run" | null;
 }) {
   const { pathname } = useRouter();
   const { configured, user, loading } = useAuth();
@@ -683,8 +711,18 @@ export function Layout({
         <title>{title ? `${title} · testflow` : "testflow"}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
-      <div className="min-h-screen bg-white text-zinc-900 dark:bg-[#0b0b0d] dark:text-zinc-100">
-        <header className="sticky top-0 z-40 border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#0b0b0d]">
+      <div className="tf-grid min-h-screen text-zinc-900 dark:text-zinc-100">
+        <header className="sticky top-0 z-40 border-b border-zinc-200 bg-(--tf-bg)/92 backdrop-blur-sm dark:border-zinc-800/90">
+          <div
+            aria-hidden="true"
+            className={`h-0.5 w-full transition-colors ${
+              signal === "record"
+                ? "tf-live bg-red-500"
+                : signal === "run"
+                  ? "bg-zinc-900 dark:bg-zinc-100"
+                  : "bg-transparent"
+            }`}
+          />
           <div className="mx-auto flex h-12 max-w-6xl items-center gap-5 px-5">
             <Link href="/" className="shrink-0 transition-opacity hover:opacity-70">
               <Mark />

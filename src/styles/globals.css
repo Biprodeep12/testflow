@@ -4,10 +4,10 @@
  * Theme.
  *
  * `dark:` is driven by a CLASS, not by prefers-color-scheme, because the theme
- * is now a user choice with three states (light / dark / follow the system).
- * The media query still decides what "system" MEANS — it is read once in the
- * boot script in _document and resolved to a class, so there is exactly one
- * source of truth at paint time.
+ * is a user choice with three states (light / dark / follow the system). The
+ * media query still decides what "system" MEANS — it is read once in the boot
+ * script in _document and resolved to a class, so there is exactly one source
+ * of truth at paint time.
  * ------------------------------------------------------------------ */
 
 @custom-variant dark (&:where(.dark, .dark *));
@@ -20,28 +20,41 @@
     var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* ------------------------------------------------------------------ *
+ * The look: a recording instrument.
+ *
+ * Graphite chassis, silkscreen labels, ruler ticks, and ONE signal colour —
+ * red, because that is what a record light is. Green and amber stay reserved
+ * for outcomes (passed / degraded), so nothing decorative can be mistaken for
+ * a result. Everything else is the neutral ramp.
+ * ------------------------------------------------------------------ */
+
 :root {
   color-scheme: light;
-  --tf-bg: #ffffff;
+  --tf-bg: #fbfbfa;
   --tf-fg: #18181b;
   --tf-scroll-thumb: #d4d4d8;
   --tf-focus: #52525b;
+  /* Page texture. Barely visible on purpose — it should read as paper, not as
+     a pattern you notice. */
+  --tf-grid: rgba(24, 24, 27, 0.055);
 }
 
 .dark {
   color-scheme: dark;
-  --tf-bg: #0b0b0d;
+  --tf-bg: #0a0a0b;
   --tf-fg: #ededf0;
   --tf-scroll-thumb: #3f3f46;
   --tf-focus: #a1a1aa;
+  --tf-grid: rgba(255, 255, 255, 0.045);
 }
 
 body {
   background: var(--tf-bg);
   color: var(--tf-fg);
   font-family: var(--font-sans);
-  /* Slightly tighter than browser default: this is a dense tool UI, and the
-     default 16px/normal rhythm wastes a row of steps per screen. */
+  /* Tighter than the browser default: this is a dense tool, and the standard
+     16px/normal rhythm costs a row of steps per screen. */
   font-size: 14px;
   line-height: 1.5;
 }
@@ -50,7 +63,7 @@ body {
   background: color-mix(in oklab, currentColor 18%, transparent);
 }
 
-/* Keyboard focus, once, everywhere. No border-radius here — the outline already
+/* Keyboard focus, once, everywhere. No border-radius — the outline already
    follows each element's own radius, and setting one would reshape pills and
    switches the moment they take focus. */
 :focus-visible {
@@ -59,7 +72,39 @@ body {
 }
 
 /* ------------------------------------------------------------------ *
- * Scrollbars — the step lists are tall scroll regions on every page, and the
+ * Surface texture
+ * ------------------------------------------------------------------ */
+
+/** Dot grid — the "bench" the panels sit on. */
+.tf-grid {
+  background-image: radial-gradient(var(--tf-grid) 1px, transparent 1px);
+  background-size: 18px 18px;
+  background-position: -1px -1px;
+}
+
+/**
+ * Ruler ticks. Used to fill the dead space in panel headers, which turns a
+ * blank strip into part of an instrument face rather than an empty bar.
+ */
+.tf-ticks {
+  background-image: repeating-linear-gradient(
+    to right,
+    currentColor 0 1px,
+    transparent 1px 7px
+  );
+}
+
+/** Silkscreen label: the tiny engraved caption on a device panel. */
+.tf-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------------ *
+ * Scrollbars — step lists are tall scroll regions on every page, and the
  * default full-width bar visually cuts the panel in half.
  * ------------------------------------------------------------------ */
 
@@ -85,8 +130,8 @@ body {
 }
 
 /* ------------------------------------------------------------------ *
- * Motion — used only where it carries information: something is live, or
- * something just arrived. Nothing decorative.
+ * Motion — only where it carries information: something is live, something
+ * is executing, something just arrived.
  * ------------------------------------------------------------------ */
 
 @keyframes tf-blink {
@@ -95,13 +140,45 @@ body {
     opacity: 1;
   }
   50% {
-    opacity: 0.25;
+    opacity: 0.2;
   }
 }
 
-/* "This is happening right now" — recording, and the step being executed. */
+/** The record light. */
 .tf-live {
-  animation: tf-blink 1.2s steps(1, end) infinite;
+  animation: tf-blink 1.15s steps(1, end) infinite;
+}
+
+@keyframes tf-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/**
+ * A trace sweeping across the step being executed. The row is the readout;
+ * this is the needle crossing it.
+ */
+.tf-sweep {
+  position: relative;
+  overflow: hidden;
+}
+
+.tf-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, currentColor 10%, transparent),
+    transparent
+  );
+  animation: tf-sweep 1.5s ease-in-out infinite;
+  pointer-events: none;
 }
 
 @keyframes tf-shimmer {
@@ -122,6 +199,21 @@ body {
   );
   background-size: 200% 100%;
   animation: tf-shimmer 1.4s linear infinite;
+}
+
+@keyframes tf-rise {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tf-rise {
+  animation: tf-rise 0.2s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 
 /* Respect the user's setting — and note the recorder captures this too

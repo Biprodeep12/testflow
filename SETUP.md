@@ -56,6 +56,22 @@ until you save. To persist flows:
 Free (Spark) plan is enough: one write per saved flow, a handful of reads to browse
 them. No composite indexes needed.
 
+### Lock the rules before you deploy
+
+Test mode leaves the database readable and writable by anyone who knows the project
+id — and enabling auth publishes that id in the browser bundle. Nothing in this app
+reads Firestore from a browser (the client SDK is auth-only; the API routes use the
+Admin SDK, which bypasses rules), so the production rule is a full deny:
+
+**Firestore Database → Rules →** paste [firestore.rules](firestore.rules) → **Publish**.
+Or `firebase deploy --only firestore:rules`.
+
+Verify: the dashboard keeps working, and this returns `"PERMISSION_DENIED"` —
+
+```bash
+curl "https://firestore.googleapis.com/v1/projects/<PROJECT_ID>/databases/(default)/documents/flows"
+```
+
 ---
 
 ## 4. Sign-in (optional)
@@ -91,6 +107,18 @@ request and your Firestore rules.
 **Existing flows are not lost.** Recordings saved before you turned auth on have no
 owner, and they stay readable by any signed-in user — the alternative would look
 exactly like data loss. Everything saved afterwards is owned.
+
+**The e2e suites need auth off.** They drive the dashboard as a user and cannot sign
+in, so with auth configured they stop at the sign-in screen. Start the server with the
+three values blanked — an empty value beats `.env.local`, and blanking them is what
+switches auth off:
+
+```bash
+NEXT_PUBLIC_FIREBASE_API_KEY= NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN= \
+NEXT_PUBLIC_FIREBASE_PROJECT_ID= npx next dev -p 3000
+```
+
+(PowerShell: `$env:NEXT_PUBLIC_FIREBASE_API_KEY=""` etc., then `npx next dev`.)
 
 The theme (light / dark / follow the OS) is a per-browser setting in the header; it
 has nothing to do with auth.

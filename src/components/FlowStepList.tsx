@@ -53,9 +53,10 @@ function displayLabel(text: string): string {
 
 export type StepStatus = "pending" | "running" | "pass" | "fail" | "skipped";
 
+/** Markers ride ON the trace, so pending must still read against the rule. */
 const DOT: Record<StepStatus, string> = {
-  pending: "bg-zinc-200 dark:bg-zinc-800",
-  running: "bg-zinc-900 tf-live dark:bg-zinc-100",
+  pending: "bg-zinc-300 dark:bg-zinc-700",
+  running: "tf-live bg-zinc-900 dark:bg-zinc-100",
   pass: "bg-emerald-500",
   fail: "bg-red-500",
   skipped: "bg-zinc-200 dark:bg-zinc-800",
@@ -102,20 +103,34 @@ const StepRow = memo(function StepRow({
   return (
     <li
       data-testid="tf-step"
-      className={`group flex items-start gap-2.5 px-3 py-1.5 text-[13px] transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900/60 ${
+      className={`group relative flex items-stretch gap-2.5 py-1.5 pr-3 pl-3 text-[13px] transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900/60 ${
         (status && ROW[status]) ?? ""
-      }`}
+      } ${status === "running" ? "tf-sweep" : ""}`}
     >
-      <span className="w-7 shrink-0 pt-px text-right font-mono text-[11px] tabular-nums text-zinc-400 dark:text-zinc-600">
+      <span className="w-6 shrink-0 pt-px text-right font-mono text-[11px] tabular-nums text-zinc-300 dark:text-zinc-700">
         {index + 1}
       </span>
-      {status && (
-        <span className="grid h-4.5 w-1.5 shrink-0 place-items-center">
-          <span className={`h-1.5 w-1.5 ${DOT[status]}`} aria-label={status} />
-        </span>
-      )}
+      {/*
+        The trace. A continuous rule down the list with each step's marker
+        riding on it — the recording IS a sequence, and a column of unconnected
+        dots does not say so. The marker's ring punches it through the line.
+      */}
+      <span className="relative flex w-2 shrink-0 justify-center">
+        {/* Extended by the row's own vertical padding so the rule is
+            continuous from step to step rather than dashed by the gaps. */}
+        <span
+          aria-hidden="true"
+          className="absolute -top-1.5 -bottom-1.5 w-px bg-zinc-200 dark:bg-zinc-800"
+        />
+        <span
+          aria-label={status}
+          className={`relative mt-1 h-1.5 w-1.5 shrink-0 rounded-full ring-2 ring-white transition-colors group-hover:ring-zinc-50 dark:ring-zinc-950 dark:group-hover:ring-zinc-900 ${
+            status ? DOT[status] : "bg-zinc-300 dark:bg-zinc-700"
+          }`}
+        />
+      </span>
       <span
-        className={`w-26 shrink-0 truncate font-mono text-[11px] leading-4.5 ${
+        className={`w-24 shrink-0 truncate font-mono text-[11px] leading-4.5 ${
           PASSIVE.has(step.type)
             ? "text-zinc-400 dark:text-zinc-600"
             : "text-zinc-500 dark:text-zinc-400"
@@ -217,27 +232,47 @@ export function FlowStepList({
   const shown = offset > 0 ? steps.slice(offset) : steps;
 
   return (
-    <ol className="divide-y divide-zinc-100 dark:divide-zinc-900">
-      {offset > 0 && (
-        <li className="px-3 py-1.5 text-center font-mono text-[11px] text-zinc-500">
-          {offset} earlier {offset === 1 ? "step" : "steps"} hidden — all saved,
-          latest {maxRendered} drawn
-        </li>
-      )}
-      {shown.map((step, shownIndex) => {
-        const index = shownIndex + offset;
-        return (
-          <StepRow
-            key={index}
-            step={step}
-            index={index}
-            status={statuses ? (statuses[index] ?? "pending") : undefined}
-            error={errors?.[index]}
-            note={notes?.[index]}
-            degraded={meta?.[index]?.degraded}
-          />
-        );
-      })}
-    </ol>
+    <>
+      {/*
+        Column header, sticky inside the scroll region. The step list is a
+        table of three aligned columns and was reading as an unlabelled dump;
+        naming them costs one row and makes the mono column legible as data.
+        Widths mirror StepRow exactly — change one, change the other.
+      */}
+      <div className="sticky top-0 z-10 flex items-center gap-2.5 border-b border-zinc-200 bg-white/95 px-3 py-1.5 backdrop-blur-sm dark:border-zinc-800/90 dark:bg-zinc-950/95">
+        <span className="tf-label w-6 shrink-0 text-right text-zinc-400 dark:text-zinc-600">
+          #
+        </span>
+        <span aria-hidden="true" className="w-2 shrink-0" />
+        <span className="tf-label w-24 shrink-0 text-zinc-400 dark:text-zinc-600">
+          step
+        </span>
+        <span className="tf-label flex-1 text-zinc-400 dark:text-zinc-600">
+          target
+        </span>
+      </div>
+      <ol className="divide-y divide-zinc-100 dark:divide-zinc-900">
+        {offset > 0 && (
+          <li className="px-3 py-1.5 text-center font-mono text-[11px] text-zinc-500">
+            {offset} earlier {offset === 1 ? "step" : "steps"} hidden — all saved,
+            latest {maxRendered} drawn
+          </li>
+        )}
+        {shown.map((step, shownIndex) => {
+          const index = shownIndex + offset;
+          return (
+            <StepRow
+              key={index}
+              step={step}
+              index={index}
+              status={statuses ? (statuses[index] ?? "pending") : undefined}
+              error={errors?.[index]}
+              note={notes?.[index]}
+              degraded={meta?.[index]?.degraded}
+            />
+          );
+        })}
+      </ol>
+    </>
   );
 }

@@ -1,0 +1,65 @@
+rules_version = '2';
+
+// ---------------------------------------------------------------------------
+// TestFlow — production Firestore rules.
+//
+// DENY EVERYTHING. That is not a placeholder, it is the correct rule for this
+// app, because no browser ever talks to Firestore here:
+//
+//   * the Firebase client SDK is loaded for AUTH ONLY (src/lib/firebase-client.ts
+//     imports firebase/auth and nothing else)
+//   * every read and write goes through the Next.js API routes, which use the
+//     Admin SDK (src/lib/flows.ts)
+//
+// The Admin SDK authenticates as a service account and BYPASSES these rules
+// entirely, so locking clients out costs the app nothing while removing the
+// only unauthenticated path to the data.
+//
+// Why this matters more than it used to: enabling Firebase Auth publishes
+// NEXT_PUBLIC_FIREBASE_PROJECT_ID and the API key into the browser bundle. That
+// is normal and safe on its own — those identify the project, they do not grant
+// access — but it does mean anyone who loads the dashboard learns the project
+// id. With "test mode" rules still in place, that id is enough to read and write
+// every recorded flow straight from the Firestore REST API, bypassing the token
+// check in src/lib/auth-server.ts. Recordings contain full URLs (session tokens
+// in query strings), typed form values, and uploaded file bytes.
+//
+// Deploy: Firebase console -> Firestore Database -> Rules -> paste -> Publish.
+// Or:     firebase deploy --only firestore:rules
+//
+// IF you ever move reads into the browser, do not relax this file globally —
+// add a narrow rule for that one collection and keep the default deny. See the
+// commented block at the bottom for the shape that would take.
+// ---------------------------------------------------------------------------
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny for every path, including ones added later. A rule that
+    // matches nothing is safer than a rule that forgets a collection.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reference only — NOT active.
+//
+// If the dashboard ever reads flows directly from the browser (a live flow list,
+// say), this is the shape: owner-scoped, server-authoritative on ownership, and
+// still no client writes. `uid` is stamped by the API on save and must never
+// become client-writable, or a caller could assign a flow to someone else.
+//
+//   match /flows/{flowId} {
+//     allow read: if request.auth != null
+//                 && resource.data.uid == request.auth.uid;
+//     allow write: if false;   // writes stay on the server
+//   }
+//
+// Note this would NOT reproduce current behaviour exactly: flows saved before
+// auth was enabled carry uid "local" and are deliberately readable by any
+// signed-in user through the API. Replicating that here would mean
+// `resource.data.uid in [request.auth.uid, 'local']` — worth deciding
+// consciously rather than inheriting.
+// ---------------------------------------------------------------------------
