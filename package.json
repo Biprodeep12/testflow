@@ -2,9 +2,9 @@
   "name": "testflow",
   "version": "0.1.0",
   "private": true,
-  "//engines": "firebase-admin@14 requires Node >=22. With nothing declared here a host is free to build on an older runtime, where firebase-admin throws while its MODULE IS EVALUATED — before any handler runs, so the route cannot turn it into a JSON error and the platform serves a plain-text 500 instead. Deploy targets read this field to pick the runtime; it is what keeps prod on the version the dependencies actually require.",
+  "//engines": "22.12 is a hard floor, not a preference. firebase-admin/auth eagerly requires jwks-rsa, which does a top-level require('jose') — and jose@6 is pure ESM. require() of an ESM package only works on Node >=20.19 or >=22.12 (hence jwks-rsa's own engines: ^20.19.0 || ^22.12.0 || >=23). On anything older it throws ERR_REQUIRE_ESM while the API route MODULE IS EVALUATED, so no handler runs, the JSON envelope never happens, and Next serves its HTML 500 page — while /api/health, which never imports the auth helper, keeps working. firebase-admin@14 also requires >=22 on its own. Deploy targets read this field to choose the runtime; without it a host is free to pick a Node that cannot load this dependency tree.",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "dev": "next dev",

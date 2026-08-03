@@ -11,7 +11,6 @@
  */
 
 import type { NextApiRequest } from "next";
-import { getAuth } from "firebase-admin/auth";
 import { adminApp, FirebaseNotConfiguredError } from "./firebase-admin";
 import { sendErr, type ApiRes } from "./api";
 
@@ -46,6 +45,22 @@ export async function requireUser(
     sendErr(res, 401, "Sign in to continue.");
     return null;
   }
+
+  /*
+   * Imported HERE, not at module scope, and deliberately outside the try below.
+   *
+   * `firebase-admin/auth` eagerly pulls in jwks-rsa -> jose, and jose is ESM —
+   * so on a Node without require(esm) this import throws. As a top-level
+   * import that threw while the ROUTE MODULE was being evaluated, which no
+   * handler can catch: Next answered with an HTML error page and the client
+   * could only report "the server returned an error page". Loading it here
+   * means the route module always evaluates, so a broken runtime arrives as a
+   * JSON 500 naming the real error instead of an opaque page.
+   *
+   * Outside the try because a module that will not load is not an expired
+   * session; it must reach route(), not become a 401.
+   */
+  const { getAuth } = await import("firebase-admin/auth");
 
   try {
     // Verifies signature, issuer, audience AND expiry against Google's public
