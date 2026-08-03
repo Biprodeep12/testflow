@@ -25,7 +25,10 @@
       "world": "MAIN"
     },
     {
-      "matches": ["http://localhost:3000/*"],
+      "matches": [
+        "http://localhost:3000/*",
+        "https://testflow-xi-tan.vercel.app/*"
+      ],
       "js": ["bridge.js"],
       "run_at": "document_idle"
     }

@@ -124,11 +124,31 @@ npm run e2e          # records on demo.html through the real extension — 12 as
 npm run e2e:replay   # replays steps through the extension bridge — 9 assertions
 ```
 
-### Dashboard on a different origin?
+### Dashboard origins
 
-The bridge content script is matched on `http://localhost:3000` in
-[extension/manifest.json](extension/manifest.json). Deploying the dashboard elsewhere
-= add that origin to the bridge's `matches` and rebuild.
+The bridge content script — the only channel between a dashboard page and the
+extension — is injected by ORIGIN, listed in
+[extension/manifest.json](extension/manifest.json):
+
+```
+http://localhost:3000/*
+https://testflow-xi-tan.vercel.app/*
+```
+
+A dashboard served anywhere else loads perfectly and simply cannot talk to the
+extension, which presents as "extension not loaded". To add an origin: put it in the
+bridge's `matches`, `npm run build:ext`, then **reload the extension** at
+`chrome://extensions` — a manifest change is not hot-reloaded.
+
+Two things to know:
+
+- **Exact host only.** Vercel preview deployments get their own hostnames
+  (`…-git-branch-….vercel.app`), so they will NOT match. Add one explicitly if you
+  need to drive the extension from a preview.
+- **This list is a trust boundary.** Any page on a matched origin can send the
+  extension commands — start a recording on any URL, replay arbitrary steps. That is
+  the point on your own deployment; it is also why the list should stay short and
+  why sharing `localhost:3000` with unrelated projects is worth avoiding.
 
 ---
 

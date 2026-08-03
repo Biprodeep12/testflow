@@ -27,8 +27,8 @@ entry points bundled IIFE into `extension/dist/`, plus a copy of the manifest an
 
 [manifest.json](extension/manifest.json) — MV3. Permissions: `storage`, `tabs`,
 `debugger`, `downloads`. Host permissions: `<all_urls>`. The bridge is matched only on
-`http://localhost:3000/*`, which is why the dashboard never needs to know the
-extension's id.
+`http://localhost:3000/*` and `https://testflow-xi-tan.vercel.app/*`, which is why the
+dashboard never needs to know the extension's id.
 
 [shared/flow.ts](extension/src/shared/flow.ts) is a one-line re-export of the
 dashboard's [src/types/flow.ts](src/types/flow.ts) — the extension and the app compile
@@ -639,4 +639,4 @@ misaligned flow still replays by position, it just cannot be trusted.
 | Subframe `waitForExpression` skips CDP | `Runtime.evaluate` targets the main frame; the content script handles subframes |
 | Uploads over 256 KB | name kept, bytes dropped, `degraded: "upload-truncated"` |
 | One session at a time | by design — `startSession` stops any existing one |
-| Bridge is hardcoded to `localhost:3000` | manifest `matches`; change it for a deployed dashboard |
+| Bridge only runs on listed origins (`localhost:3000`, the Vercel deployment) | manifest `matches` — exact hosts, so Vercel previews need adding explicitly |

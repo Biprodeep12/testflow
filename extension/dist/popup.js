@@ -11,8 +11,41 @@
   var stopBtn = document.getElementById("stop");
   var downloadBtn = document.getElementById("download");
   var dashLink = document.getElementById("dash");
-  var DASHBOARD_URL = "http://localhost:3000";
-  dashLink.href = DASHBOARD_URL;
+  var DASHBOARDS = ["https://testflow-xi-tan.vercel.app", "http://localhost:3000"];
+  async function openDashboardTab() {
+    try {
+      const tabs = await chrome.tabs.query({
+        url: DASHBOARDS.map((origin) => `${origin}/*`)
+      });
+      return tabs[0];
+    } catch {
+      return void 0;
+    }
+  }
+  dashLink.href = DASHBOARDS[0];
+  void openDashboardTab().then((tab) => {
+    if (tab?.url) {
+      try {
+        dashLink.href = new URL(tab.url).origin;
+      } catch {
+      }
+    }
+  });
+  dashLink.addEventListener("click", (event) => {
+    event.preventDefault();
+    void (async () => {
+      const existing = await openDashboardTab();
+      if (existing?.id !== void 0) {
+        await chrome.tabs.update(existing.id, { active: true });
+        if (existing.windowId !== void 0) {
+          await chrome.windows.update(existing.windowId, { focused: true });
+        }
+      } else {
+        await chrome.tabs.create({ url: DASHBOARDS[0], active: true });
+      }
+      window.close();
+    })();
+  });
   async function getSession() {
     const data = await chrome.storage.session.get("tf-session");
     return data["tf-session"] ?? null;

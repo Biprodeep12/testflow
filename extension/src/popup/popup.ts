@@ -29,8 +29,57 @@ const stopBtn = document.getElementById("stop") as HTMLButtonElement;
 const downloadBtn = document.getElementById("download") as HTMLButtonElement;
 const dashLink = document.getElementById("dash") as HTMLAnchorElement;
 
-const DASHBOARD_URL = "http://localhost:3000";
-dashLink.href = DASHBOARD_URL;
+/**
+ * Every origin the bridge content script is injected on — KEEP IN STEP WITH
+ * manifest.json. A dashboard on any other origin loads fine and simply cannot
+ * talk to the extension, which looks like the extension being broken.
+ *
+ * Production first: it is the answer when nothing else is open.
+ */
+const DASHBOARDS = ["https://testflow-xi-tan.vercel.app", "http://localhost:3000"];
+
+/** A dashboard tab that already exists, preferred over opening another. */
+async function openDashboardTab(): Promise<chrome.tabs.Tab | undefined> {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: DASHBOARDS.map((origin) => `${origin}/*`),
+    });
+    return tabs[0];
+  } catch {
+    return undefined;
+  }
+}
+
+// Sensible default for middle-click / "copy link", replaced below by whichever
+// dashboard is actually open — during local development that is localhost, and
+// silently sending you to production would lose the recording you are looking at.
+dashLink.href = DASHBOARDS[0];
+void openDashboardTab().then((tab) => {
+  if (tab?.url) {
+    try {
+      dashLink.href = new URL(tab.url).origin;
+    } catch {
+      /* keep the default */
+    }
+  }
+});
+
+dashLink.addEventListener("click", (event) => {
+  event.preventDefault();
+  void (async () => {
+    const existing = await openDashboardTab();
+    if (existing?.id !== undefined) {
+      // Focus it rather than stacking up duplicate dashboards.
+      await chrome.tabs.update(existing.id, { active: true });
+      if (existing.windowId !== undefined) {
+        await chrome.windows.update(existing.windowId, { focused: true });
+      }
+    } else {
+      await chrome.tabs.create({ url: DASHBOARDS[0], active: true });
+    }
+    window.close();
+  })();
+});
 
 async function getSession(): Promise<Session | null> {
   const data = await chrome.storage.session.get("tf-session");
