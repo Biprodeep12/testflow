@@ -12,7 +12,7 @@
 
 import type { NextApiRequest } from "next";
 import { getAuth } from "firebase-admin/auth";
-import { adminApp } from "./firebase-admin";
+import { adminApp, FirebaseNotConfiguredError } from "./firebase-admin";
 import { sendErr, type ApiRes } from "./api";
 
 export const authEnabled = Boolean(
@@ -52,7 +52,12 @@ export async function requireUser(
     // keys — a client-decoded uid would be trivially forgeable.
     const decoded = await getAuth(adminApp()).verifyIdToken(token);
     return { uid: decoded.uid, email: decoded.email };
-  } catch {
+  } catch (err) {
+    // A server with no service account is not an expired session. Swallowing
+    // that into a 401 told everyone to sign in again on a deployment that
+    // could never have accepted the token — let it reach route(), which
+    // answers 503 naming the missing variables.
+    if (err instanceof FirebaseNotConfiguredError) throw err;
     sendErr(res, 401, "Your session expired. Sign in again.");
     return null;
   }

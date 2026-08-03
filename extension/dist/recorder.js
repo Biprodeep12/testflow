@@ -120,6 +120,16 @@
   // extension/src/content/cursor.ts
   var SVG_NS = "http://www.w3.org/2000/svg";
   var ID = "__tf_cursor";
+  function promote(el) {
+    const api = el;
+    if (typeof api.showPopover !== "function" || !el.isConnected) return;
+    try {
+      if (!el.hasAttribute("popover")) el.setAttribute("popover", "manual");
+      if (!el.matches(":popover-open")) api.showPopover();
+    } catch {
+      el.removeAttribute("popover");
+    }
+  }
   var root = null;
   var ripple = null;
   var guard = null;
@@ -130,8 +140,14 @@
     container.id = ID;
     const style = container.style;
     style.position = "fixed";
+    style.inset = "auto";
     style.left = "0";
     style.top = "0";
+    style.margin = "0";
+    style.border = "0";
+    style.padding = "0";
+    style.background = "transparent";
+    style.overflow = "visible";
     style.zIndex = "2147483647";
     style.pointerEvents = "none";
     style.width = "0";
@@ -169,15 +185,35 @@
     container.appendChild(pulse);
     container.appendChild(svg);
     document.body.appendChild(container);
+    promote(container);
     ripple = pulse;
     return container;
   }
+  function raise(el) {
+    const api = el;
+    if (typeof api.hidePopover !== "function" || !el.matches(":popover-open")) {
+      promote(el);
+      return;
+    }
+    try {
+      if (!document.querySelector(`dialog:modal, :popover-open:not(#${ID})`)) return;
+      api.hidePopover();
+      api.showPopover();
+    } catch {
+    }
+  }
   function ensure() {
-    if (root && root.isConnected) return root;
+    if (root && root.isConnected) {
+      raise(root);
+      return root;
+    }
     root = build();
     if (root && !guard) {
       guard = new MutationObserver(() => {
-        if (root && !root.isConnected && document.body) document.body.appendChild(root);
+        if (root && !root.isConnected && document.body) {
+          document.body.appendChild(root);
+          promote(root);
+        }
       });
       try {
         guard.observe(document.body, { childList: true });

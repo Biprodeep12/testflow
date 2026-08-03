@@ -7,7 +7,9 @@ import {
   ErrorNote,
   Input,
   Layout,
+  PageBody,
   PageHeader,
+  SOLID,
 } from "@/components/Layout";
 import { apiFetch, relativeTime } from "@/lib/client";
 import { usePoll } from "@/hooks/usePoll";
@@ -67,72 +69,109 @@ export default function FlowsPage() {
         actions={
           <Link
             href="/"
-            className="inline-flex h-8 items-center rounded-md bg-zinc-900 px-3 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
+            className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium transition-all duration-150 ease-out active:translate-y-px ${SOLID}`}
           >
+            <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true">
+              <circle cx="8" cy="8" r="3.4" fill="currentColor" />
+            </svg>
             New recording
           </Link>
         }
       />
 
-      <ErrorNote message={error} />
+      <PageBody>
+        <ErrorNote message={error} />
 
-      {/* Search earns its place only once scanning stops being instant. */}
-      {flows.length > 5 && (
-        <div className="mt-5 max-w-xs">
-          <Input
-            value={query}
-            onChange={setQuery}
-            placeholder="Filter by name or URL"
-            label="Filter flows"
-          />
-        </div>
-      )}
-
-      <Card className="mt-5 overflow-hidden">
-        {!loaded ? (
-          <ul className="divide-y divide-zinc-100 dark:divide-zinc-900">
-            {[0, 1, 2].map((row) => (
-              <li key={row} className="flex items-center gap-4 px-3 py-2.5">
-                <span className="tf-shimmer h-3.5 flex-1 rounded bg-zinc-100 text-zinc-400 dark:bg-zinc-900" />
-                <span className="tf-shimmer h-3.5 w-16 rounded bg-zinc-100 text-zinc-400 dark:bg-zinc-900" />
-              </li>
-            ))}
-          </ul>
-        ) : shown.length === 0 ? (
-          <EmptyState
-            title={flows.length === 0 ? "No saved flows" : "No matches"}
-            hint={
-              flows.length === 0
-                ? "Record a flow and save it — it will show up here."
-                : "Try a different name or URL."
-            }
-          />
-        ) : (
-          <ul className="divide-y divide-zinc-100 dark:divide-zinc-900">
-            {shown.map((flow) => (
-              <li key={flow.id}>
-                <Link
-                  href={`/flows/${flow.id}`}
-                  className="group flex items-center gap-3 px-3 py-2.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900/60"
-                >
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-medium">
-                      {flow.title}
-                    </span>
-                    <span className="mt-0.5 block truncate font-mono text-[11px] text-zinc-500">
-                      {hostOf(flow.sourceUrl)}
-                    </span>
-                  </span>
-                  <Badge>{flow.stepCount} steps</Badge>
-                  <span className="hidden w-20 shrink-0 text-right font-mono text-[11px] text-zinc-400 sm:block">
-                    {relativeTime(flow.updatedAt)}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
+        {/* Search earns its place only once scanning stops being instant. */}
+        {flows.length > 5 && (
+          <div className="max-w-xs">
+            <Input
+              value={query}
+              onChange={setQuery}
+              placeholder="Filter by name or URL"
+              label="Filter flows"
+            />
+          </div>
         )}
-      </Card>
+
+        <Card className="overflow-hidden">
+          {!loaded ? (
+            <ul className="divide-y divide-line-soft">
+              {[0, 1, 2].map((row) => (
+                <li key={row} className="flex items-center gap-4 px-3.5 py-3">
+                  <span className="flex min-w-0 flex-1 flex-col gap-1.5">
+                    <span className="tf-shimmer h-3.5 w-1/3 rounded bg-line-soft text-muted" />
+                    <span className="tf-shimmer h-2.5 w-1/5 rounded bg-line-soft text-muted" />
+                  </span>
+                  <span className="tf-shimmer h-4 w-16 rounded bg-line-soft text-muted" />
+                </li>
+              ))}
+            </ul>
+          ) : shown.length === 0 ? (
+            <EmptyState
+              icon={
+                <svg viewBox="0 0 16 16" className="h-4 w-4" aria-hidden="true">
+                  <circle
+                    cx="8"
+                    cy="8"
+                    r="5.6"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                  />
+                  <circle cx="8" cy="8" r="1.8" fill="currentColor" />
+                </svg>
+              }
+              title={flows.length === 0 ? "No saved flows" : "No matches"}
+              hint={
+                flows.length === 0
+                  ? "Record a flow and save it — it will show up here."
+                  : "Try a different name or URL."
+              }
+            />
+          ) : (
+            <ul className="divide-y divide-line-soft">
+              {shown.map((flow) => (
+                <li key={flow.id}>
+                  <Link
+                    href={`/flows/${flow.id}`}
+                    className="group flex items-center gap-3 px-3.5 py-3 transition-colors duration-150 hover:bg-sunken"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-medium">
+                        {flow.title}
+                      </span>
+                      <span className="mt-0.5 block truncate font-mono text-[11px] text-muted">
+                        {hostOf(flow.sourceUrl)}
+                      </span>
+                    </span>
+                    <Badge>{flow.stepCount} steps</Badge>
+                    <span className="hidden w-20 shrink-0 text-right font-mono text-[11px] text-faint sm:block">
+                      {relativeTime(flow.updatedAt)}
+                    </span>
+                    {/* Reveals on hover: the row is a link, and a chevron says so
+                      without printing an arrow on every row of a long list. */}
+                    <svg
+                      viewBox="0 0 16 16"
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5 shrink-0 -translate-x-1 text-faint opacity-0 transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100"
+                    >
+                      <path
+                        d="M6 3.5 10.5 8 6 12.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+      </PageBody>
     </Layout>
   );
 }

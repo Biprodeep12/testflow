@@ -2,6 +2,10 @@
   "name": "testflow",
   "version": "0.1.0",
   "private": true,
+  "//engines": "firebase-admin@14 requires Node >=22. With nothing declared here a host is free to build on an older runtime, where firebase-admin throws while its MODULE IS EVALUATED — before any handler runs, so the route cannot turn it into a JSON error and the platform serves a plain-text 500 instead. Deploy targets read this field to pick the runtime; it is what keeps prod on the version the dependencies actually require.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",

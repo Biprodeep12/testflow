@@ -13,7 +13,13 @@
  * with an effect.
  */
 
-import { useCallback, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 
 export type ThemeChoice = "light" | "dark" | "system";
 
@@ -93,12 +99,18 @@ export function useTheme(): {
     for (const listener of listeners) listener();
   }, []);
 
-  // Following the OS and it changed mid-session (sunset, a manual flip): the
-  // subscription re-rendered us, so re-apply the class to match.
-  if (typeof document !== "undefined" && choice === "system") {
-    const dark = document.documentElement.classList.contains("dark");
-    if (dark !== systemDark) applyToDocument("system");
-  }
+  // Keep the class in step with whatever the store now says: the OS flipped
+  // mid-session (sunset), or another tab changed the choice.
+  //
+  // This MUST be an effect, not a render-phase write. During hydration
+  // useSyncExternalStore serves the SERVER snapshot — choice "system",
+  // systemDark false — which describes nobody's actual settings. Correcting the
+  // DOM from those values stripped the class the boot script had just set, so a
+  // stored "dark" on a light OS reverted to light on every single load. Effects
+  // run after hydration, where both snapshots are the real ones.
+  useEffect(() => {
+    applyToDocument(choice);
+  }, [choice, systemDark]);
 
   return useMemo(
     () => ({

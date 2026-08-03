@@ -55,19 +55,23 @@ export type StepStatus = "pending" | "running" | "pass" | "fail" | "skipped";
 
 /** Markers ride ON the trace, so pending must still read against the rule. */
 const DOT: Record<StepStatus, string> = {
-  pending: "bg-zinc-300 dark:bg-zinc-700",
-  running: "tf-live bg-zinc-900 dark:bg-zinc-100",
+  pending: "bg-line-strong",
+  running: "tf-live bg-zinc-900 shadow-[0_0_0_3px] shadow-zinc-900/15 dark:bg-zinc-100 dark:shadow-zinc-100/20",
   pass: "bg-emerald-500",
-  fail: "bg-red-500",
-  skipped: "bg-zinc-200 dark:bg-zinc-800",
+  fail: "bg-red-500 shadow-[0_0_0_3px] shadow-red-500/20",
+  skipped: "bg-line",
 };
 
 /** Only the states worth finding without reading get a tint. */
 const ROW: Partial<Record<StepStatus, string>> = {
-  running: "bg-zinc-50 dark:bg-zinc-900/60",
-  fail: "bg-red-50/70 dark:bg-red-950/20",
+  running: "bg-sunken",
+  fail: "bg-red-500/6",
   skipped: "opacity-45",
 };
+
+/** The recorder's own warnings about a step, as one chip shape. */
+const CHIP =
+  "shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-px font-mono text-[10px] tracking-wide text-amber-700 uppercase dark:text-amber-500";
 
 /**
  * One row, memoized.
@@ -103,11 +107,11 @@ const StepRow = memo(function StepRow({
   return (
     <li
       data-testid="tf-step"
-      className={`group relative flex items-stretch gap-2.5 py-1.5 pr-3 pl-3 text-[13px] transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900/60 ${
+      className={`group relative flex items-stretch gap-2.5 py-1.5 pr-3.5 pl-3.5 text-[13px] transition-colors duration-150 hover:bg-sunken ${
         (status && ROW[status]) ?? ""
       } ${status === "running" ? "tf-sweep" : ""}`}
     >
-      <span className="w-6 shrink-0 pt-px text-right font-mono text-[11px] tabular-nums text-zinc-300 dark:text-zinc-700">
+      <span className="w-6 shrink-0 pt-px text-right font-mono text-[11px] tabular-nums text-faint/70">
         {index + 1}
       </span>
       {/*
@@ -120,20 +124,18 @@ const StepRow = memo(function StepRow({
             continuous from step to step rather than dashed by the gaps. */}
         <span
           aria-hidden="true"
-          className="absolute -top-1.5 -bottom-1.5 w-px bg-zinc-200 dark:bg-zinc-800"
+          className="absolute -top-1.5 -bottom-1.5 w-px bg-line"
         />
         <span
           aria-label={status}
-          className={`relative mt-1 h-1.5 w-1.5 shrink-0 rounded-full ring-2 ring-white transition-colors group-hover:ring-zinc-50 dark:ring-zinc-950 dark:group-hover:ring-zinc-900 ${
-            status ? DOT[status] : "bg-zinc-300 dark:bg-zinc-700"
+          className={`relative mt-1 h-1.5 w-1.5 shrink-0 rounded-full ring-2 ring-surface transition-colors group-hover:ring-sunken ${
+            status ? DOT[status] : "bg-line-strong"
           }`}
         />
       </span>
       <span
         className={`w-24 shrink-0 truncate font-mono text-[11px] leading-4.5 ${
-          PASSIVE.has(step.type)
-            ? "text-zinc-400 dark:text-zinc-600"
-            : "text-zinc-500 dark:text-zinc-400"
+          PASSIVE.has(step.type) ? "text-faint" : "text-muted"
         }`}
       >
         {step.type}
@@ -143,9 +145,7 @@ const StepRow = memo(function StepRow({
           <span
             title={text}
             className={`min-w-0 truncate leading-4.5 ${
-              PASSIVE.has(step.type)
-                ? "text-zinc-500 dark:text-zinc-500"
-                : "text-zinc-800 dark:text-zinc-200"
+              PASSIVE.has(step.type) ? "text-muted" : "text-ink"
             }`}
           >
             {displayLabel(text)}
@@ -153,7 +153,7 @@ const StepRow = memo(function StepRow({
           {degraded === "positional-only" && (
             <span
               title="Only a positional selector was available — no test id, label or stable text. The first markup change breaks this step."
-              className="shrink-0 rounded border border-amber-300 px-1 font-mono text-[10px] tracking-wide text-amber-700 uppercase dark:border-amber-900 dark:text-amber-500"
+              className={CHIP}
             >
               fragile
             </span>
@@ -161,14 +161,14 @@ const StepRow = memo(function StepRow({
           {degraded === "upload-truncated" && (
             <span
               title="The file was too large to carry inside the flow — only its name was kept."
-              className="shrink-0 rounded border border-amber-300 px-1 font-mono text-[10px] tracking-wide text-amber-700 uppercase dark:border-amber-900 dark:text-amber-500"
+              className={CHIP}
             >
               file truncated
             </span>
           )}
         </span>
         {step.type === "change" && (
-          <span className="mt-0.5 block truncate font-mono text-xs text-zinc-500">
+          <span className="mt-0.5 block truncate font-mono text-xs text-muted">
             {step.value === "" ? "(empty — masked or cleared)" : step.value}
           </span>
         )}
@@ -184,14 +184,14 @@ const StepRow = memo(function StepRow({
           </span>
         )}
         {error && (
-          <span className="mt-1 block border-l-2 border-red-400 pl-2 text-xs text-red-700 dark:border-red-800 dark:text-red-400">
+          <span className="mt-1.5 block rounded-md border-l-2 border-red-500 bg-red-500/8 py-1 pr-2 pl-2 text-xs text-red-700 dark:text-red-400">
             {error}
           </span>
         )}
         {note && (
           <span
             title={note}
-            className="mt-1 block truncate border-l-2 border-amber-400 pl-2 text-xs text-amber-700 dark:border-amber-800 dark:text-amber-500"
+            className="mt-1.5 block truncate rounded-md border-l-2 border-amber-500 bg-amber-500/8 py-1 pr-2 pl-2 text-xs text-amber-700 dark:text-amber-500"
           >
             {note}
           </span>
@@ -239,21 +239,15 @@ export function FlowStepList({
         naming them costs one row and makes the mono column legible as data.
         Widths mirror StepRow exactly — change one, change the other.
       */}
-      <div className="sticky top-0 z-10 flex items-center gap-2.5 border-b border-zinc-200 bg-white/95 px-3 py-1.5 backdrop-blur-sm dark:border-zinc-800/90 dark:bg-zinc-950/95">
-        <span className="tf-label w-6 shrink-0 text-right text-zinc-400 dark:text-zinc-600">
-          #
-        </span>
+      <div className="sticky top-0 z-10 flex items-center gap-2.5 border-b border-line-soft bg-surface/85 px-3.5 py-2 backdrop-blur-xl">
+        <span className="tf-label w-6 shrink-0 text-right text-faint">#</span>
         <span aria-hidden="true" className="w-2 shrink-0" />
-        <span className="tf-label w-24 shrink-0 text-zinc-400 dark:text-zinc-600">
-          step
-        </span>
-        <span className="tf-label flex-1 text-zinc-400 dark:text-zinc-600">
-          target
-        </span>
+        <span className="tf-label w-24 shrink-0 text-faint">step</span>
+        <span className="tf-label flex-1 text-faint">target</span>
       </div>
-      <ol className="divide-y divide-zinc-100 dark:divide-zinc-900">
+      <ol className="divide-y divide-line-soft">
         {offset > 0 && (
-          <li className="px-3 py-1.5 text-center font-mono text-[11px] text-zinc-500">
+          <li className="bg-sunken px-3 py-1.5 text-center font-mono text-[11px] text-muted">
             {offset} earlier {offset === 1 ? "step" : "steps"} hidden — all saved,
             latest {maxRendered} drawn
           </li>

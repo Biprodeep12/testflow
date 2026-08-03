@@ -12,14 +12,6 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-@theme {
-  --font-sans:
-    var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI",
-    Roboto, sans-serif;
-  --font-mono:
-    var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-}
-
 /* ------------------------------------------------------------------ *
  * The look: a recording instrument.
  *
@@ -27,26 +19,107 @@
  * red, because that is what a record light is. Green and amber stay reserved
  * for outcomes (passed / degraded), so nothing decorative can be mistaken for
  * a result. Everything else is the neutral ramp.
+ *
+ * The ramp is SEMANTIC, not literal: `surface`, `line`, `muted` rather than
+ * `zinc-200 dark:zinc-800`. Every component then states its intent once and
+ * both themes follow, which is the only way a two-theme UI stays consistent
+ * as it grows — a hardcoded pair is a place for the themes to drift apart.
  * ------------------------------------------------------------------ */
 
 :root {
   color-scheme: light;
+
+  /* Chassis */
   --tf-bg: #fbfbfa;
-  --tf-fg: #18181b;
-  --tf-scroll-thumb: #d4d4d8;
-  --tf-focus: #52525b;
+  --tf-surface: #ffffff;
+  --tf-raised: #ffffff;
+  --tf-sunken: #f5f5f4;
+
+  /* Hairlines. Alpha, not solid, so a rule reads the same over the page
+     texture, over a panel, and over a tinted row. */
+  --tf-line: rgba(9, 9, 11, 0.1);
+  --tf-line-soft: rgba(9, 9, 11, 0.055);
+  --tf-line-strong: rgba(9, 9, 11, 0.2);
+
+  /* Type ramp: ink for content, muted for chrome, faint for silkscreen. */
+  --tf-fg: #17171a;
+  --tf-muted: #5c5c66;
+  --tf-faint: #9b9ba5;
+
+  /* Depth. Two layers each: a tight contact shadow that seats the panel on
+     the page, and a wide diffuse one that gives it a body. A single blurred
+     drop shadow is what makes 2010s UI look like 2010s UI. */
+  --tf-shadow-1:
+    0 1px 2px -1px rgba(9, 9, 11, 0.07), 0 1px 1px rgba(9, 9, 11, 0.035);
+  --tf-shadow-2:
+    0 1px 2px -1px rgba(9, 9, 11, 0.08), 0 8px 24px -12px rgba(9, 9, 11, 0.16);
+  --tf-shadow-pop:
+    0 1px 2px -1px rgba(9, 9, 11, 0.1), 0 16px 40px -16px rgba(9, 9, 11, 0.28);
+  /* Top-edge highlight on solid buttons — reads as a lit bevel. */
+  --tf-sheen: rgba(255, 255, 255, 0.16);
+
+  --tf-scroll-thumb: rgba(9, 9, 11, 0.18);
+  --tf-focus: #3f3f46;
   /* Page texture. Barely visible on purpose — it should read as paper, not as
      a pattern you notice. */
   --tf-grid: rgba(24, 24, 27, 0.055);
+  /* Light falling on the top of the chassis. Keeps the page from being a flat
+     fill without introducing a colour that competes with the record light. */
+  --tf-glow: rgba(90, 95, 120, 0.09);
 }
 
 .dark {
   color-scheme: dark;
-  --tf-bg: #0a0a0b;
+
+  --tf-bg: #08080a;
+  --tf-surface: #0f0f12;
+  --tf-raised: #16161a;
+  --tf-sunken: #0c0c0e;
+
+  --tf-line: rgba(255, 255, 255, 0.09);
+  --tf-line-soft: rgba(255, 255, 255, 0.05);
+  --tf-line-strong: rgba(255, 255, 255, 0.18);
+
   --tf-fg: #ededf0;
-  --tf-scroll-thumb: #3f3f46;
+  --tf-muted: #9a9aa4;
+  --tf-faint: #6b6b76;
+
+  --tf-shadow-1: 0 1px 2px -1px rgba(0, 0, 0, 0.7), 0 1px 1px rgba(0, 0, 0, 0.4);
+  --tf-shadow-2:
+    0 1px 2px -1px rgba(0, 0, 0, 0.8), 0 10px 30px -14px rgba(0, 0, 0, 0.9);
+  --tf-shadow-pop:
+    0 1px 2px -1px rgba(0, 0, 0, 0.9), 0 20px 48px -18px rgba(0, 0, 0, 1);
+  --tf-sheen: rgba(255, 255, 255, 0.06);
+
+  --tf-scroll-thumb: rgba(255, 255, 255, 0.16);
   --tf-focus: #a1a1aa;
   --tf-grid: rgba(255, 255, 255, 0.045);
+  --tf-glow: rgba(105, 115, 165, 0.14);
+}
+
+/*
+ * `inline` matters: it makes the utilities compile to the raw var() reference
+ * instead of a snapshot of its value, so `.dark` re-pointing a token is enough
+ * to retheme every `bg-surface` / `border-line` on the page. Without it the
+ * class-based dark mode would need a `dark:` twin for every one of them again.
+ */
+@theme inline {
+  --font-sans:
+    var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono:
+    var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --color-canvas: var(--tf-bg);
+  --color-surface: var(--tf-surface);
+  --color-raised: var(--tf-raised);
+  --color-sunken: var(--tf-sunken);
+  --color-line: var(--tf-line);
+  --color-line-soft: var(--tf-line-soft);
+  --color-line-strong: var(--tf-line-strong);
+  --color-ink: var(--tf-fg);
+  --color-muted: var(--tf-muted);
+  --color-faint: var(--tf-faint);
 }
 
 body {
@@ -57,6 +130,10 @@ body {
      16px/normal rhythm costs a row of steps per screen. */
   font-size: 14px;
   line-height: 1.5;
+  /* Numbers in this UI are quantities to compare (step counts, durations,
+     viewports), so they line up by default rather than per-component. */
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
@@ -67,19 +144,50 @@ body {
    follows each element's own radius, and setting one would reshape pills and
    switches the moment they take focus. */
 :focus-visible {
-  outline: 1.5px solid var(--tf-focus);
+  outline: 2px solid var(--tf-focus);
   outline-offset: 2px;
+}
+
+/**
+ * A composed field: a bordered shell wrapping a label and a bare input, which
+ * together read as one control. The ring therefore belongs on the SHELL — left
+ * on the inner input it draws a second rectangle floating INSIDE the border,
+ * cutting across the label divider.
+ *
+ * The inner reset cannot be Tailwind's `outline-none`: the rule above is
+ * unlayered and utilities live in `@layer utilities`, so unlayered wins no
+ * matter the class. Beating it on specificity here is what actually works.
+ */
+.tf-field:has(:focus-visible) {
+  outline: 2px solid var(--tf-focus);
+  outline-offset: 2px;
+}
+
+.tf-field :focus-visible {
+  outline: none;
 }
 
 /* ------------------------------------------------------------------ *
  * Surface texture
  * ------------------------------------------------------------------ */
 
-/** Dot grid — the "bench" the panels sit on. */
-.tf-grid {
-  background-image: radial-gradient(var(--tf-grid) 1px, transparent 1px);
-  background-size: 18px 18px;
-  background-position: -1px -1px;
+/**
+ * The bench the panels sit on: a dot grid for texture, plus a wide pool of
+ * light from the top edge. The glow is sized in pixels rather than as a
+ * percentage so it stays a light source on a long page instead of stretching
+ * into a gradient over the whole scroll.
+ */
+.tf-canvas {
+  background-image:
+    radial-gradient(var(--tf-grid) 1px, transparent 1px),
+    radial-gradient(120% 620px at 50% -80px, var(--tf-glow), transparent 70%);
+  background-size:
+    18px 18px,
+    100% 700px;
+  background-position:
+    -1px -1px,
+    0 0;
+  background-repeat: repeat, no-repeat;
 }
 
 /**
@@ -92,6 +200,10 @@ body {
     currentColor 0 1px,
     transparent 1px 7px
   );
+  /* Fade early. At full strength across a wide panel the rail stops being a
+     registration mark and becomes the loudest thing in the header — it should
+     trail off into the panel, not measure it. */
+  mask-image: linear-gradient(to right, #000 0%, transparent 72%);
 }
 
 /** Silkscreen label: the tiny engraved caption on a device panel. */
@@ -101,6 +213,27 @@ body {
   line-height: 1;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+}
+
+/* Elevation. Named by intent so a panel says how far off the page it sits,
+   not which shadow recipe it borrowed. */
+.tf-elev-1 {
+  box-shadow: var(--tf-shadow-1);
+}
+
+.tf-elev-2 {
+  box-shadow: var(--tf-shadow-2);
+}
+
+.tf-elev-pop {
+  box-shadow: var(--tf-shadow-pop);
+}
+
+/** Solid buttons: lit top edge over the contact shadow. */
+.tf-sheen {
+  box-shadow:
+    inset 0 1px 0 0 var(--tf-sheen),
+    var(--tf-shadow-1);
 }
 
 /* ------------------------------------------------------------------ *
@@ -129,6 +262,10 @@ body {
   border-radius: 9999px;
 }
 
+.tf-scroll:hover::-webkit-scrollbar-thumb {
+  background-color: var(--tf-line-strong);
+}
+
 /* ------------------------------------------------------------------ *
  * Motion — only where it carries information: something is live, something
  * is executing, something just arrived.
@@ -147,6 +284,28 @@ body {
 /** The record light. */
 .tf-live {
   animation: tf-blink 1.15s steps(1, end) infinite;
+}
+
+/**
+ * The status rail across the top of the chrome. It breathes rather than
+ * blinking: a hard on/off strip that wide reads as a rendering glitch, and a
+ * halo is what makes a lit line look lit.
+ */
+@keyframes tf-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    filter: brightness(1);
+  }
+  50% {
+    opacity: 0.55;
+    filter: brightness(1.35);
+  }
+}
+
+.tf-rail-live {
+  animation: tf-pulse 1.6s ease-in-out infinite;
+  box-shadow: 0 0 12px 0 currentColor;
 }
 
 @keyframes tf-sweep {
@@ -204,7 +363,7 @@ body {
 @keyframes tf-rise {
   from {
     opacity: 0;
-    transform: translateY(3px);
+    transform: translateY(4px) scale(0.995);
   }
   to {
     opacity: 1;
@@ -213,7 +372,7 @@ body {
 }
 
 .tf-rise {
-  animation: tf-rise 0.2s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  animation: tf-rise 0.24s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 
 /* Respect the user's setting — and note the recorder captures this too

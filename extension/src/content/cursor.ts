@@ -19,6 +19,32 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ID = "__tf_cursor";
 
+/**
+ * Lifts the cursor into the browser's TOP LAYER.
+ *
+ * z-index is already maxed, but z-index only ever competes inside its own
+ * stacking context — so a modal <dialog>, a [popover], or any ancestor of
+ * <body> that creates a context still paints straight over it. The top layer
+ * sits above every stacking context on the page, which is the only way to be
+ * genuinely on top of a page you do not control.
+ *
+ * The z-index stays as the fallback for engines without the popover API.
+ */
+function promote(el: HTMLElement): void {
+  const api = el as HTMLElement & { showPopover?: () => void };
+  if (typeof api.showPopover !== "function" || !el.isConnected) return;
+  try {
+    if (!el.hasAttribute("popover")) el.setAttribute("popover", "manual");
+    // Re-showing an open popover throws, and the catch below would then strip
+    // the attribute off a perfectly good cursor.
+    if (!el.matches(":popover-open")) api.showPopover();
+  } catch {
+    // A [popover] that is not open is display:none — failing to show it would
+    // hide the cursor outright, which is worse than not being in the top layer.
+    el.removeAttribute("popover");
+  }
+}
+
 let root: HTMLElement | null = null;
 let ripple: HTMLElement | null = null;
 let guard: MutationObserver | null = null;
@@ -32,8 +58,17 @@ function build(): HTMLElement | null {
   container.id = ID;
   const style = container.style;
   style.position = "fixed";
+  // The UA stylesheet gives [popover] its own box: inset:0, margin:auto, a
+  // border, padding, a background and overflow:hidden. All of it has to go —
+  // overflow:hidden alone would clip a 0×0 container down to nothing.
+  style.inset = "auto";
   style.left = "0";
   style.top = "0";
+  style.margin = "0";
+  style.border = "0";
+  style.padding = "0";
+  style.background = "transparent";
+  style.overflow = "visible";
   style.zIndex = "2147483647";
   style.pointerEvents = "none"; // see the file header — this one is load-bearing
   style.width = "0";
@@ -80,20 +115,59 @@ function build(): HTMLElement | null {
   container.appendChild(pulse);
   container.appendChild(svg);
   document.body.appendChild(container);
+  promote(container);
   ripple = pulse;
   return container;
 }
 
+/**
+ * Keeps the cursor at the END of the top layer.
+ *
+ * Being in the top layer is not the same as being on top OF it: entries paint
+ * in the order they were shown, so a modal <dialog> or a popover the page opens
+ * AFTER the cursor covers it — exactly the dialogs a run needs to be watched
+ * through. Re-showing moves it back to the end.
+ *
+ * Gated on something else actually being up there, because hide/show on every
+ * move is churn the common case does not need.
+ */
+function raise(el: HTMLElement): void {
+  const api = el as HTMLElement & {
+    showPopover?: () => void;
+    hidePopover?: () => void;
+  };
+  if (typeof api.hidePopover !== "function" || !el.matches(":popover-open")) {
+    promote(el);
+    return;
+  }
+  try {
+    if (!document.querySelector(`dialog:modal, :popover-open:not(#${ID})`)) return;
+    api.hidePopover();
+    api.showPopover();
+  } catch {
+    /* left where it was — still the max z-index */
+  }
+}
+
 function ensure(): HTMLElement | null {
   // Rebuilt when the page replaced its body — a SPA route change often does.
-  if (root && root.isConnected) return root;
+  if (root && root.isConnected) {
+    raise(root);
+    return root;
+  }
   root = build();
   if (root && !guard) {
     // A framework that re-renders into <body> throws the cursor away with everything
     // else. Without this it stays gone until the next step that happens to move it,
     // which is most of a run on an app that re-renders often.
     guard = new MutationObserver(() => {
-      if (root && !root.isConnected && document.body) document.body.appendChild(root);
+      if (root && !root.isConnected && document.body) {
+        document.body.appendChild(root);
+        // Removal from the DOM closes the popover, so re-entering the top layer
+        // is part of putting it back — otherwise the cursor survives the
+        // re-render but sinks under the page's own layers.
+        promote(root);
+      }
     });
     try {
       guard.observe(document.body, { childList: true });

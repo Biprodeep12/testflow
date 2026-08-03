@@ -6,20 +6,26 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
 
   /**
-   * Leave firebase-admin out of the server bundle.
+   * Belt and braces, and nothing more — do not read this as the fix for the
+   * plain-500 production failure. It was once believed to be, and it is not:
    *
-   * It resolves its subpaths (`firebase-admin/auth`, `/firestore`) through
-   * conditional exports and dynamic requires, and gRPC/protobufjs load files at
-   * runtime. Bundling that works locally — where node_modules is present either
-   * way — and then fails on a platform that ships only what the bundler traced:
-   * the module throws while being EVALUATED, before any handler runs, so the
-   * route never gets to return its JSON envelope and Next serves its HTML 500
-   * page instead. That is exactly the shape of the production failure: every
-   * route importing the auth helper died, while /api/health (firestore only)
-   * kept working.
+   *   - `serverExternalPackages` only opts out of the bundling that
+   *     `bundlePagesRouterDependencies` turns ON, and that defaults to false.
+   *     This app is Pages Router, so its server dependencies were never
+   *     bundled to begin with.
+   *   - `firebase-admin` is already in Next's own built-in external list
+   *     (next/dist/lib/server-external-packages.json).
    *
-   * Marking it external makes Next emit a plain require() and lets the host
-   * trace the real package — the arrangement Firebase documents for Next.js.
+   * The build's file trace confirms it: the emitted route requires
+   * firebase-admin, and the trace carries gRPC, protobufjs and the Firestore
+   * .proto assets. Nothing was missing.
+   *
+   * The real cause was the Node version — firebase-admin@14 requires >=22 and
+   * nothing declared it, so a host could build on an older runtime where the
+   * module throws while being evaluated. See `engines` in package.json.
+   *
+   * Kept because it costs nothing and would still be correct if
+   * bundlePagesRouterDependencies were ever switched on.
    */
   serverExternalPackages: ["firebase-admin"],
 

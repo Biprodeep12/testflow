@@ -12,6 +12,7 @@ import {
   Field,
   Input,
   Layout,
+  PageBody,
   PageHeader,
 } from "@/components/Layout";
 import { FlowStepList } from "@/components/FlowStepList";
@@ -29,6 +30,15 @@ import {
 
 type Phase = "form" | "waiting" | "recording" | "stopped";
 
+/**
+ * The live step list takes what the viewport has left, with a floor.
+ *
+ * Shorter than the flow page's panel because this one sits under a sticky
+ * status bar AND auto-scrolls to the newest step — the last row wants to land
+ * comfortably above the fold, not flush against it.
+ */
+const LIVE_PANEL = "max-h-[max(22rem,calc(100dvh-26rem))]";
+
 function defaultTitle(): string {
   const now = new Date();
   return `Recording ${now.toLocaleDateString()} at ${now.toLocaleTimeString()}`;
@@ -41,7 +51,7 @@ function sendHub(message: HubMessage): void {
 /** Inline code — commands and paths, so they are copyable by eye. */
 function Mono({ children }: { children: React.ReactNode }) {
   return (
-    <code className="rounded border border-zinc-200 px-1 font-mono text-[12px] text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">
+    <code className="rounded-md border border-line-soft bg-sunken px-1.5 py-0.5 font-mono text-[12px] text-ink">
       {children}
     </code>
   );
@@ -101,7 +111,9 @@ export default function RecordPage() {
           break;
         case "stopped":
           setPhase((current) =>
-            current === "recording" || current === "waiting" ? "stopped" : current,
+            current === "recording" || current === "waiting"
+              ? "stopped"
+              : current,
           );
           break;
         default:
@@ -187,7 +199,11 @@ export default function RecordPage() {
     // stripped from downloads so the JSON is byte-compatible with DevTools.
     save2(
       JSON.stringify(
-        { title: title.trim() || defaultTitle(), timeout: 5000, steps: exportSteps(steps) },
+        {
+          title: title.trim() || defaultTitle(),
+          timeout: 5000,
+          steps: exportSteps(steps),
+        },
         null,
         4,
       ),
@@ -198,7 +214,13 @@ export default function RecordPage() {
   // The full recording, runnable by `npm run flow` without Firebase in the loop.
   const downloadBundle = () => {
     save2(
-      toBundle({ title: title.trim() || defaultTitle(), timeout: 5000, steps, meta, env }),
+      toBundle({
+        title: title.trim() || defaultTitle(),
+        timeout: 5000,
+        steps,
+        meta,
+        env,
+      }),
       BUNDLE_EXTENSION,
     );
   };
@@ -212,10 +234,14 @@ export default function RecordPage() {
       signal={phase === "recording" || phase === "waiting" ? "record" : null}
       actions={
         extensionReady !== null && (
-          <Badge tone={extensionReady ? "success" : "warning"}>
-            <Dot tone={extensionReady ? "success" : "warning"} />
-            {extensionReady ? "extension ready" : "no extension"}
-          </Badge>
+          // Supplementary at phone width — the page states the same thing far
+          // more loudly, and this is what pushes the header into overflow.
+          <span className="hidden sm:flex">
+            <Badge tone={extensionReady ? "success" : "warning"}>
+              <Dot tone={extensionReady ? "success" : "warning"} />
+              {extensionReady ? "extension ready" : "no extension"}
+            </Badge>
+          </span>
         )
       }
     >
@@ -224,174 +250,205 @@ export default function RecordPage() {
         description="The extension opens the URL in a new tab and captures every interaction — across navigations, iframes and popups. Nothing is stored until you save."
       />
 
-      <AuthConfigNote />
-      <ErrorNote message={error} />
+      <PageBody>
+        <AuthConfigNote />
+        <ErrorNote message={error} />
 
-      {extensionReady === false && (
-        <Card className="mt-5 p-4">
-          <h2 className="flex items-center gap-2 text-[13px] font-medium">
-            <Dot tone="warning" />
-            Extension not loaded
-          </h2>
-          <ol className="mt-2.5 space-y-1 text-[13px] text-zinc-500 dark:text-zinc-400">
-            <li>
-              1. <Mono>npm run build:ext</Mono>
-            </li>
-            <li>
-              2. <Mono>chrome://extensions</Mono> → enable Developer mode
-            </li>
-            <li>
-              3. Load unpacked → <Mono>extension/dist</Mono>
-            </li>
-            <li>4. Reload this page</li>
-          </ol>
-        </Card>
-      )}
+        {extensionReady === false && (
+          <Card className="tf-rise p-4">
+            <h2 className="flex items-center gap-2 text-[13px] font-medium">
+              <Dot tone="warning" live />
+              Extension not loaded
+            </h2>
+            <ol className="mt-3 space-y-1.5 text-[13px] text-muted">
+              {[
+                <>
+                  <Mono>npm run build:ext</Mono>
+                </>,
+                <>
+                  <Mono>chrome://extensions</Mono> → enable Developer mode
+                </>,
+                <>
+                  Load unpacked → <Mono>extension/dist</Mono>
+                </>,
+                <>Reload this page</>,
+              ].map((line, step) => (
+                <li key={step} className="flex items-center gap-2.5">
+                  <span className="grid h-4.5 w-4.5 shrink-0 place-items-center rounded-full border border-line-soft bg-sunken font-mono text-[10px] text-faint">
+                    {step + 1}
+                  </span>
+                  <span className="min-w-0">{line}</span>
+                </li>
+              ))}
+            </ol>
+          </Card>
+        )}
 
-      {phase === "form" && (
-        <Card className="tf-rise mt-5 overflow-hidden">
-          <CardHeader title="New session" />
-          <form onSubmit={start} className="flex flex-col gap-3 p-4">
-            {/*
+        {phase === "form" && (
+          <Card className="tf-rise overflow-hidden">
+            <CardHeader title="New session" />
+            <form onSubmit={start} className="flex flex-col gap-3 p-4">
+              {/*
               A command bar rather than a labelled field: the URL is the input
               to an instrument, and the engraved prefix carries the label so the
               row reads as one control instead of a form.
             */}
-            <div className="flex gap-2">
-              <div className="flex h-9 flex-1 items-center rounded-md border border-zinc-200 bg-white transition-colors focus-within:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-950 dark:focus-within:border-zinc-600">
-                <span className="tf-label shrink-0 self-center border-r border-zinc-200 px-2.5 py-1 text-zinc-400 dark:border-zinc-800 dark:text-zinc-600">
-                  URL
-                </span>
-                <input
-                  value={url}
-                  onChange={(event) => setUrl(event.target.value)}
-                  placeholder="https://example.com"
-                  required
-                  aria-label="Target URL"
-                  className="h-full min-w-0 flex-1 bg-transparent px-2.5 font-mono text-[13px] outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
-                />
-              </div>
-              <Button
-                type="submit"
-                disabled={extensionReady !== true}
-                className="h-9 px-4"
-              >
-                Start Session
-              </Button>
-            </div>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
-              <button
-                type="button"
-                onClick={() => setUrl(`${window.location.origin}/demo.html`)}
-                className="underline underline-offset-4 hover:text-zinc-900 dark:hover:text-zinc-100"
-              >
-                use the demo page
-              </button>
-              <span className="text-zinc-300 dark:text-zinc-700">·</span>
-              <span>Or hit Record in the extension popup on any tab.</span>
-            </div>
-          </form>
-        </Card>
-      )}
-
-      {phase !== "form" && (
-        <>
-          {/* Sticky: Stop must stay reachable however far the step list has
-              scrolled — a recording left running keeps capturing. */}
-          <div className="sticky top-12.5 z-30 -mx-5 mt-5 border-y border-zinc-200 bg-(--tf-bg)/92 px-5 py-2 backdrop-blur-sm dark:border-zinc-800/90">
-            <div className="flex flex-wrap items-center gap-3">
-              {phase === "waiting" && (
-                <span className="flex items-center gap-2 text-[13px] text-zinc-500">
-                  <Dot tone="warning" live />
-                  Opening tab…
-                </span>
-              )}
-              {phase === "recording" && (
-                <span className="flex items-center gap-2 text-[13px] font-medium">
-                  <Dot tone="danger" live />
-                  Recording
-                </span>
-              )}
-              {phase === "stopped" && (
-                <span className="flex items-center gap-2 text-[13px] text-zinc-500">
-                  <Dot />
-                  Stopped
-                </span>
-              )}
-              <Badge testId="tf-step-count">{steps.length} steps</Badge>
-              {interactionCount > 0 && (
-                <span className="font-mono text-[11px] text-zinc-500">
-                  {interactionCount} interaction{interactionCount === 1 ? "" : "s"}
-                </span>
-              )}
-              <span className="flex-1" />
-              {phase !== "stopped" && (
-                <Button variant="danger" onClick={stop}>
-                  Stop recording
+              <div className="flex gap-2">
+                <div className="tf-field flex h-10 flex-1 items-center rounded-lg border border-line bg-surface transition-colors duration-150 focus-within:border-line-strong">
+                  <span className="tf-label shrink-0 self-center border-r border-line-soft px-3 py-1.5 text-faint">
+                    URL
+                  </span>
+                  <input
+                    value={url}
+                    onChange={(event) => setUrl(event.target.value)}
+                    placeholder="https://example.com"
+                    required
+                    aria-label="Target URL"
+                    className="h-full min-w-0 flex-1 bg-transparent px-3 font-mono text-[13px] placeholder:text-faint"
+                  />
+                </div>
+                <Button
+                  type="submit"
+                  disabled={extensionReady !== true}
+                  className="h-10 px-4"
+                >
+                  Start session
                 </Button>
-              )}
-            </div>
-          </div>
-
-          {phase === "stopped" && (
-            <Card className="mt-5 p-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
-                <div className="flex-1">
-                  <Field label="Flow name">
-                    <Input value={title} onChange={setTitle} />
-                  </Field>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  <Button onClick={save} disabled={saving || interactionCount === 0}>
-                    {saving ? "Saving…" : "Save flow"}
-                  </Button>
-                  <Button variant="secondary" onClick={downloadBundle}>
-                    Download bundle
-                  </Button>
-                  <Button variant="secondary" onClick={download}>
-                    Download JSON
-                  </Button>
-                  <Button variant="ghost" onClick={discard}>
-                    Discard
-                  </Button>
-                </div>
               </div>
-              {interactionCount === 0 && (
-                <p className="mt-2 text-xs text-zinc-500">
-                  No interactions recorded — nothing to save.
-                </p>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+                <button
+                  type="button"
+                  onClick={() => setUrl(`${window.location.origin}/demo.html`)}
+                  className="underline decoration-line-strong underline-offset-4 transition-colors hover:text-ink"
+                >
+                  use the demo page
+                </button>
+                <span className="text-faint">·</span>
+                <span>Or hit Record in the extension popup on any tab.</span>
+              </div>
+            </form>
+          </Card>
+        )}
+
+        {phase !== "form" && (
+          <>
+            {/* Sticky: Stop must stay reachable however far the step list has
+              scrolled — a recording left running keeps capturing. */}
+            <div className="sticky top-13.5 z-30 -mx-5 border-y border-line bg-canvas/75 px-5 py-2.5 backdrop-blur-xl">
+              <div className="flex flex-wrap items-center gap-3">
+                {phase === "waiting" && (
+                  <span className="flex items-center gap-2 text-[13px] text-muted">
+                    <Dot tone="warning" live />
+                    Opening tab…
+                  </span>
+                )}
+                {phase === "recording" && (
+                  <span className="flex items-center gap-2 rounded-md border border-red-500/25 bg-red-500/10 px-2 py-1 text-[13px] font-medium text-red-700 dark:text-red-400">
+                    <Dot tone="danger" live />
+                    Recording
+                  </span>
+                )}
+                {phase === "stopped" && (
+                  <span className="flex items-center gap-2 text-[13px] text-muted">
+                    <Dot />
+                    Stopped
+                  </span>
+                )}
+                <Badge testId="tf-step-count">{steps.length} steps</Badge>
+                {interactionCount > 0 && (
+                  <span className="font-mono text-[11px] text-muted">
+                    {interactionCount} interaction
+                    {interactionCount === 1 ? "" : "s"}
+                  </span>
+                )}
+                <span className="flex-1" />
+                {phase !== "stopped" && (
+                  <Button variant="danger" onClick={stop}>
+                    Stop recording
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {phase === "stopped" && (
+              <Card className="tf-rise p-4">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+                  <div className="flex-1">
+                    <Field label="Flow name">
+                      <Input value={title} onChange={setTitle} />
+                    </Field>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Button
+                      onClick={save}
+                      disabled={saving || interactionCount === 0}
+                    >
+                      {saving ? "Saving…" : "Save flow"}
+                    </Button>
+                    <Button variant="secondary" onClick={downloadBundle}>
+                      Download bundle
+                    </Button>
+                    <Button variant="secondary" onClick={download}>
+                      Download JSON
+                    </Button>
+                    <Button variant="ghost" onClick={discard}>
+                      Discard
+                    </Button>
+                  </div>
+                </div>
+                {interactionCount === 0 && (
+                  <p className="mt-2.5 text-xs text-muted">
+                    No interactions recorded — nothing to save.
+                  </p>
+                )}
+              </Card>
+            )}
+
+            <Card className="overflow-hidden">
+              <CardHeader
+                title="Steps"
+                right={
+                  phase === "recording" ? (
+                    <span className="flex items-center gap-1.5 font-mono text-[11px] text-red-600 dark:text-red-400">
+                      <Dot tone="danger" live />
+                      live
+                    </span>
+                  ) : undefined
+                }
+              />
+              {steps.length === 0 ? (
+                <EmptyState
+                  icon={
+                    <svg
+                      viewBox="0 0 16 16"
+                      className="h-4 w-4"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M2.5 8h3l2-4 3 8 2-4h1.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.3"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  }
+                  title="No steps yet"
+                  hint="Interact with the opened tab — clicks, typing, scrolling and navigations land here as they happen."
+                />
+              ) : (
+                <div className={`tf-scroll overflow-y-auto ${LIVE_PANEL}`}>
+                  {/* Live view: this re-renders on every captured step, so the drawn
+                    list is bounded. The recording keeps everything. */}
+                  <FlowStepList steps={steps} meta={meta} maxRendered={150} />
+                  <div ref={bottom} />
+                </div>
               )}
             </Card>
-          )}
-
-          <Card className="mt-5 overflow-hidden">
-            <CardHeader
-              title="Steps"
-              right={
-                phase === "recording" ? (
-                  <span className="flex items-center gap-1.5 font-mono text-[11px] text-zinc-500">
-                    <Dot tone="danger" live />
-                    live
-                  </span>
-                ) : undefined
-              }
-            />
-            {steps.length === 0 ? (
-              <EmptyState
-                title="No steps yet"
-                hint="Interact with the opened tab — clicks, typing, scrolling and navigations land here as they happen."
-              />
-            ) : (
-              <div className="tf-scroll max-h-128 overflow-y-auto">
-                {/* Live view: this re-renders on every captured step, so the drawn
-                    list is bounded. The recording keeps everything. */}
-                <FlowStepList steps={steps} meta={meta} maxRendered={150} />
-                <div ref={bottom} />
-              </div>
-            )}
-          </Card>
-        </>
-      )}
+          </>
+        )}
+      </PageBody>
     </Layout>
   );
 }

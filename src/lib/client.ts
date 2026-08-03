@@ -41,13 +41,36 @@ export async function apiFetch<T>(
     },
   });
 
-  const payload = (await response.json().catch(() => null)) as
-    | { ok: true; data: T }
-    | { ok: false; error: string }
-    | null;
+  /*
+   * Read as text and parse by hand, because the interesting failures are
+   * exactly the ones that are NOT our envelope.
+   *
+   * Next rejects an oversized or malformed body inside its own request
+   * pipeline, and a module that throws while being evaluated never reaches a
+   * handler at all — in both cases the reply is plain text ("Body exceeded 1mb
+   * limit", "Internal Server Error") with no `ok` field. Discarding that body
+   * and reporting "non-JSON response (500)" threw away the one line that says
+   * what actually went wrong.
+   */
+  const raw = await response.text();
 
-  if (!payload) {
-    throw new Error(`${path} returned a non-JSON response (${response.status})`);
+  let payload: { ok: true; data: T } | { ok: false; error: string } | null = null;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    payload = null;
+  }
+
+  if (!payload || typeof payload.ok !== "boolean") {
+    // An HTML error page has nothing quotable in its first line, so name the
+    // shape instead of pasting markup at the user.
+    const looksHtml = /^\s*<(?:!doctype|html)/i.test(raw);
+    const detail = looksHtml
+      ? "the server returned an error page"
+      : raw.trim().split("\n")[0].slice(0, 200) ||
+        response.statusText ||
+        "no response body";
+    throw new Error(`${path} failed (${response.status}): ${detail}`);
   }
   if (!payload.ok) throw new Error(payload.error);
   return payload.data;

@@ -7,6 +7,7 @@ import {
   Dot,
   ErrorNote,
   Layout,
+  PageBody,
   PageHeader,
   ProgressBar,
   Segmented,
@@ -40,6 +41,18 @@ type Speed = "fast" | "recorded";
  * recorded" pacing and killed runs on reload.
  */
 const CONNECT_TIMEOUT_MS = 20000;
+
+/**
+ * How tall the reading panel gets: everything the viewport has left after the
+ * chrome and the console above it, with a floor so a short window still shows
+ * a usable run of steps.
+ *
+ * It was a flat 40rem, which is one specific monitor's answer. On a tall screen
+ * that left a band of empty page under a list that was still scrolling; on a
+ * laptop it pushed the last rows under the fold. `dvh` rather than `vh` so a
+ * mobile browser's collapsing toolbar does not crop it.
+ */
+const PANEL = "max-h-[max(26rem,calc(100dvh-23rem))]";
 
 function sendHub(message: HubMessage): void {
   window.postMessage(message, window.location.origin);
@@ -111,21 +124,29 @@ export default function FlowPage() {
       }
 
       if (data.kind === "runProgress") {
-        if (runIdRef.current === null || data.runId !== runIdRef.current) return;
+        if (runIdRef.current === null || data.runId !== runIdRef.current)
+          return;
         if (connectTimer.current) {
           clearTimeout(connectTimer.current);
           connectTimer.current = null;
         }
         sawProgress.current = true;
         setRunState((state) => (state === "connecting" ? "running" : state));
-        setStatuses((prev) => prev.map((s, i) => (i === data.index ? data.status : s)));
-        setStepErrors((prev) => prev.map((e, i) => (i === data.index ? data.error : e)));
-        setStepNotes((prev) => prev.map((n, i) => (i === data.index ? data.note : n)));
+        setStatuses((prev) =>
+          prev.map((s, i) => (i === data.index ? data.status : s)),
+        );
+        setStepErrors((prev) =>
+          prev.map((e, i) => (i === data.index ? data.error : e)),
+        );
+        setStepNotes((prev) =>
+          prev.map((n, i) => (i === data.index ? data.note : n)),
+        );
         return;
       }
 
       if (data.kind === "runDone") {
-        if (runIdRef.current === null || data.runId !== runIdRef.current) return;
+        if (runIdRef.current === null || data.runId !== runIdRef.current)
+          return;
         if (connectTimer.current) {
           clearTimeout(connectTimer.current);
           connectTimer.current = null;
@@ -246,12 +267,17 @@ export default function FlowPage() {
   if (!flow) {
     return (
       <Layout title="Flow">
-        <ErrorNote message={error} />
+        {/* Mirrors the real page's shape — title, source, console, panel — so
+            the layout does not jump when the flow lands. */}
         <div className="space-y-3">
-          <div className="tf-shimmer h-6 w-64 rounded bg-zinc-100 text-zinc-400 dark:bg-zinc-900" />
-          <div className="tf-shimmer h-3.5 w-96 rounded bg-zinc-100 text-zinc-400 dark:bg-zinc-900" />
-          <div className="tf-shimmer mt-5 h-64 rounded-lg bg-zinc-100 text-zinc-400 dark:bg-zinc-900" />
+          <div className="tf-shimmer h-7 w-64 rounded-lg bg-line-soft text-muted" />
+          <div className="tf-shimmer h-3.5 w-96 rounded bg-line-soft text-muted" />
         </div>
+        <PageBody>
+          <ErrorNote message={error} />
+          <div className="tf-shimmer h-28 rounded-xl bg-line-soft text-muted" />
+          <div className="tf-shimmer h-96 rounded-xl bg-line-soft text-muted" />
+        </PageBody>
       </Layout>
     );
   }
@@ -265,58 +291,14 @@ export default function FlowPage() {
   const runningIndex = statuses.findIndex((s) => s === "running");
 
   return (
-    <Layout
-      title={flow.title}
-      signal={busy ? "run" : null}
-      actions={
-        <>
-          <Segmented<Speed>
-            value={speed}
-            onChange={setSpeed}
-            disabled={busy}
-            label="Replay speed"
-            options={[
-              {
-                value: "fast",
-                label: "Fast",
-                title:
-                  "Compresses your pauses: input timing (key holds, double-click spacing) is kept exactly, think time is scaled down.",
-              },
-              {
-                value: "recorded",
-                label: "As recorded",
-                title:
-                  "Keeps every pause you left, capped at 10s. Both speeds pace against deadlines, so a slow page never snowballs the run.",
-              },
-            ]}
-          />
-          <Toggle
-            checked={showCursor}
-            onChange={setShowCursor}
-            disabled={busy}
-            label="Cursor"
-            title="Glides a visible pointer to each target before acting. Adds a moment per step."
-          />
-          {busy ? (
-            <Button variant="danger" onClick={stopRun}>
-              Stop
-            </Button>
-          ) : (
-            <Button onClick={runInTab}>Run in tab</Button>
-          )}
-        </>
-      }
-    >
+    <Layout title={flow.title} signal={busy ? "run" : null}>
       <PageHeader
         eyebrow={
           <span className="flex items-center gap-1.5">
-            <Link
-              href="/flows"
-              className="transition-colors hover:text-zinc-900 dark:hover:text-zinc-100"
-            >
+            <Link href="/flows" className="transition-colors hover:text-ink">
               Flows
             </Link>
-            <span className="text-zinc-300 dark:text-zinc-700">/</span>
+            <span className="text-line-strong">/</span>
           </span>
         }
         title={flow.title}
@@ -325,172 +307,262 @@ export default function FlowPage() {
             href={flow.sourceUrl}
             target="_blank"
             rel="noreferrer"
-            className="truncate font-mono text-[12px] text-zinc-500 underline decoration-zinc-300 underline-offset-4 hover:text-zinc-900 dark:decoration-zinc-700 dark:hover:text-zinc-100"
+            className="inline-flex max-w-full items-center gap-1.5 truncate font-mono text-[12px] text-muted underline decoration-line-strong underline-offset-4 transition-colors hover:text-ink"
           >
-            {flow.sourceUrl}
+            <span className="truncate">{flow.sourceUrl}</span>
+            <svg
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+              className="h-3 w-3 shrink-0"
+            >
+              <path
+                d="M6.2 3.5h6.3v6.3M12.5 3.5 7 9M11 9.5v3h-8v-8h3"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
           </a>
         }
       />
 
-      <ErrorNote message={error} />
+      <PageBody>
+        <ErrorNote message={error} />
 
-      {/* Flow facts, and the exports that act on them. */}
-      <div className="mt-5 flex flex-wrap items-center gap-x-7 gap-y-3 rounded-lg border border-zinc-200 px-3.5 py-2.5 dark:border-zinc-800">
-        <Stat label="Steps" value={flow.steps.length} />
-        <Stat
-          label="Timeout"
-          value={`${(flow.timeout ?? DEFAULT_TIMEOUT_MS) / 1000}s`}
-        />
-        <Stat label="Updated" value={relativeTime(flow.updatedAt)} />
-        <Stat
-          label="Viewport"
-          value={
-            flow.env ? (
-              `${flow.env.viewport.width}×${flow.env.viewport.height}`
-            ) : (
-              <span className="text-zinc-400">—</span>
-            )
-          }
-        />
-        <span className="flex-1" />
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={downloadBundle}
-            title="Full recording — what `npm run flow` replays"
-          >
-            Download bundle
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={download}
-            title="Interoperable Chrome DevTools Recorder JSON"
-          >
-            Download JSON
-          </Button>
-          <Button size="sm" variant="danger" onClick={remove}>
-            Delete
-          </Button>
-        </div>
-      </div>
+        {/*
+        The console: what this flow IS, what will happen when you run it, and
+        what happened when you did — one panel, three bands.
 
-      {runState !== "idle" && (
-        <Card className="mt-3 overflow-hidden">
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-3.5 py-2.5">
-            {runState === "connecting" && (
-              <span className="flex items-center gap-2 text-[13px] text-zinc-500">
-                <Dot tone="warning" live />
-                Opening replay tab…
-              </span>
-            )}
-            {runState === "running" && (
-              <span className="flex items-center gap-2 text-[13px] font-medium">
-                <Dot tone="active" live />
-                {runningIndex >= 0
-                  ? `Step ${runningIndex + 1} of ${flow.steps.length}`
-                  : "Running"}
-              </span>
-            )}
-            {runState === "done" && (
-              <span
-                className={`flex items-center gap-2 text-[13px] font-medium ${
-                  failed === 0
-                    ? "text-emerald-700 dark:text-emerald-400"
-                    : "text-red-700 dark:text-red-400"
-                }`}
-              >
-                <Dot tone={failed === 0 ? "success" : "danger"} />
-                {failed === 0
-                  ? `${passed} passed`
-                  : `${failed} failed, ${passed} passed`}
-              </span>
-            )}
+        These were three separate cards stacked down the page, which read as
+        three unrelated things and cost a band of empty page between each. They
+        are one thing: the run you are about to start is configured by the row
+        above it and reported by the row below it, so the progress bar can sit
+        on the panel's own bottom edge instead of floating on a card of its own.
+      */}
+        <section className="tf-elev-2 overflow-hidden rounded-xl border border-line bg-surface">
+          {/* Facts, and the exports that act on them. */}
+          <div className="flex flex-wrap items-center gap-x-7 gap-y-4 px-4 py-3.5">
+            <Stat label="Steps" value={flow.steps.length} />
+            <Stat
+              label="Timeout"
+              value={`${(flow.timeout ?? DEFAULT_TIMEOUT_MS) / 1000}s`}
+            />
+            <Stat label="Updated" value={relativeTime(flow.updatedAt)} />
+            <Stat
+              label="Viewport"
+              value={
+                flow.env ? (
+                  `${flow.env.viewport.width}×${flow.env.viewport.height}`
+                ) : (
+                  <span className="text-faint">—</span>
+                )
+              }
+            />
             <span className="flex-1" />
-            <div className="flex items-center gap-3 font-mono text-[11px] text-zinc-500">
-              {passed > 0 && (
-                <span className="flex items-center gap-1.5">
-                  <Dot tone="success" /> {passed}
-                </span>
-              )}
-              {failed > 0 && (
-                <span className="flex items-center gap-1.5">
-                  <Dot tone="danger" /> {failed}
-                </span>
-              )}
-              {skipped > 0 && (
-                <span className="flex items-center gap-1.5">
-                  <Dot /> {skipped} skipped
-                </span>
-              )}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={downloadBundle}
+                title="Full recording — what `npm run flow` replays"
+              >
+                Download bundle
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={download}
+                title="Interoperable Chrome DevTools Recorder JSON"
+              >
+                Download JSON
+              </Button>
+              <Button size="sm" variant="danger" onClick={remove}>
+                Delete
+              </Button>
             </div>
           </div>
-          <ProgressBar
-            value={flow.steps.length ? settled / flow.steps.length : 0}
-            tone={failed > 0 ? "danger" : runState === "done" ? "success" : "active"}
-          />
-        </Card>
-      )}
 
-      <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
-        <Segmented<View>
-          value={view}
-          onChange={setView}
-          label="View"
-          options={[
-            { value: "steps", label: "Steps" },
-            { value: "json", label: "JSON" },
-            { value: "playwright", label: "Playwright" },
-          ]}
-        />
-        {view !== "steps" && (
-          <span className="text-xs text-zinc-500">
-            {view === "json"
-              ? "Byte-compatible with Chrome DevTools Recorder."
-              : "Generated from the steps and their sidecars."}
-          </span>
-        )}
-      </div>
-
-      <Card className="mt-3 overflow-hidden">
-        {view === "steps" && (
-          <div className="tf-scroll max-h-160 overflow-y-auto">
-            <FlowStepList
-              steps={flow.steps}
-              statuses={runState === "idle" ? undefined : statuses}
-              errors={stepErrors}
-              notes={stepNotes}
-              meta={flow.meta}
+          {/*
+          The replay controls live on the page, next to the progress they
+          produce and the step list they act on — not in the nav bar. Nav chrome
+          is for things that are true everywhere; speed and cursor only mean
+          anything on this flow.
+        */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line-soft bg-sunken px-4 py-3">
+            <span className="tf-label shrink-0 text-muted">Replay</span>
+            <Segmented<Speed>
+              value={speed}
+              onChange={setSpeed}
+              disabled={busy}
+              label="Replay speed"
+              options={[
+                {
+                  value: "fast",
+                  label: "Fast",
+                  title:
+                    "Compresses your pauses: input timing (key holds, double-click spacing) is kept exactly, think time is scaled down.",
+                },
+                {
+                  value: "recorded",
+                  label: "As recorded",
+                  title:
+                    "Keeps every pause you left, capped at 10s. Both speeds pace against deadlines, so a slow page never snowballs the run.",
+                },
+              ]}
             />
-          </div>
-        )}
-        {view === "json" && (
-          <pre className="tf-scroll max-h-160 overflow-auto p-4 font-mono text-xs leading-5">
-            {JSON.stringify(
-              {
-                title: flow.title,
-                timeout: flow.timeout ?? DEFAULT_TIMEOUT_MS,
-                steps: exportSteps(flow.steps),
-              },
-              null,
-              4,
+            <Toggle
+              checked={showCursor}
+              onChange={setShowCursor}
+              disabled={busy}
+              label="Cursor"
+              title="Glides a visible pointer to each target before acting. Adds a moment per step."
+            />
+            <span className="flex-1" />
+            {busy ? (
+              <Button variant="danger" onClick={stopRun}>
+                Stop
+              </Button>
+            ) : (
+              <Button onClick={runInTab}>Run in tab</Button>
             )}
-          </pre>
-        )}
-        {view === "playwright" && (
-          <pre className="tf-scroll max-h-160 overflow-auto p-4 font-mono text-xs leading-5">
-            {flowToPlaywright({
-              title: flow.title,
-              steps: flow.steps,
-              // The sidecars are what make the export reproduce the session:
-              // env drives test.use(), meta drives frame and tab targeting.
-              meta: flow.meta,
-              env: flow.env,
-            })}
-          </pre>
-        )}
-      </Card>
+          </div>
+
+          {runState !== "idle" && (
+            <div className="tf-rise border-t border-line-soft">
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3">
+                {runState === "connecting" && (
+                  <span className="flex items-center gap-2 text-[13px] text-muted">
+                    <Dot tone="warning" live />
+                    Opening replay tab…
+                  </span>
+                )}
+                {runState === "running" && (
+                  <span className="flex items-center gap-2 text-[13px] font-medium">
+                    <Dot tone="active" live />
+                    {runningIndex >= 0
+                      ? `Step ${runningIndex + 1} of ${flow.steps.length}`
+                      : "Running"}
+                  </span>
+                )}
+                {runState === "done" && (
+                  <span
+                    className={`flex items-center gap-2 rounded-md border px-2 py-1 text-[13px] font-medium ${
+                      failed === 0
+                        ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : "border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-400"
+                    }`}
+                  >
+                    <Dot tone={failed === 0 ? "success" : "danger"} />
+                    {failed === 0
+                      ? `${passed} passed`
+                      : `${failed} failed, ${passed} passed`}
+                  </span>
+                )}
+                <span className="flex-1" />
+                <div className="flex items-center gap-3 font-mono text-[11px] text-muted">
+                  {passed > 0 && (
+                    <span className="flex items-center gap-1.5">
+                      <Dot tone="success" /> {passed}
+                    </span>
+                  )}
+                  {failed > 0 && (
+                    <span className="flex items-center gap-1.5">
+                      <Dot tone="danger" /> {failed}
+                    </span>
+                  )}
+                  {skipped > 0 && (
+                    <span className="flex items-center gap-1.5">
+                      <Dot /> {skipped} skipped
+                    </span>
+                  )}
+                </div>
+              </div>
+              {/* Flush to the panel's bottom edge — a progress bar reads as the
+                edge of the thing making progress, not as a rule under it. */}
+              <ProgressBar
+                value={flow.steps.length ? settled / flow.steps.length : 0}
+                tone={
+                  failed > 0
+                    ? "danger"
+                    : runState === "done"
+                      ? "success"
+                      : "active"
+                }
+              />
+            </div>
+          )}
+        </section>
+
+        {/*
+        The reading panel, with its tabs docked to its own top edge. Detached
+        above the card, the tabs read as page furniture; attached, they are
+        visibly a control FOR this panel — and it costs a row of page instead
+        of a row plus a gap.
+      */}
+        <Card className="overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-3 py-2.5">
+            <Segmented<View>
+              value={view}
+              onChange={setView}
+              label="View"
+              options={[
+                { value: "steps", label: "Steps" },
+                { value: "json", label: "JSON" },
+                { value: "playwright", label: "Playwright" },
+              ]}
+            />
+            {view !== "steps" && (
+              <span className="text-xs text-muted">
+                {view === "json"
+                  ? "Byte-compatible with Chrome DevTools Recorder."
+                  : "Generated from the steps and their sidecars."}
+              </span>
+            )}
+          </div>
+          {view === "steps" && (
+            <div className={`tf-scroll overflow-y-auto ${PANEL}`}>
+              <FlowStepList
+                steps={flow.steps}
+                statuses={runState === "idle" ? undefined : statuses}
+                errors={stepErrors}
+                notes={stepNotes}
+                meta={flow.meta}
+              />
+            </div>
+          )}
+          {view === "json" && (
+            <pre
+              className={`tf-scroll overflow-auto bg-sunken p-4 font-mono text-xs leading-5 text-muted ${PANEL}`}
+            >
+              {JSON.stringify(
+                {
+                  title: flow.title,
+                  timeout: flow.timeout ?? DEFAULT_TIMEOUT_MS,
+                  steps: exportSteps(flow.steps),
+                },
+                null,
+                4,
+              )}
+            </pre>
+          )}
+          {view === "playwright" && (
+            <pre
+              className={`tf-scroll overflow-auto bg-sunken p-4 font-mono text-xs leading-5 text-muted ${PANEL}`}
+            >
+              {flowToPlaywright({
+                title: flow.title,
+                steps: flow.steps,
+                // The sidecars are what make the export reproduce the session:
+                // env drives test.use(), meta drives frame and tab targeting.
+                meta: flow.meta,
+                env: flow.env,
+              })}
+            </pre>
+          )}
+        </Card>
+      </PageBody>
     </Layout>
   );
 }
