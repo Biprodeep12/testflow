@@ -18,6 +18,7 @@
     "e2e:replay": "npm run build:ext && tsx scripts/e2e-replay.mts",
     "e2e:runner": "tsx scripts/e2e-runner.mts",
     "e2e:cli": "npm run build:ext && tsx scripts/e2e-cli.mts",
+    "e2e:anchor": "npm run build:ext && tsx scripts/e2e-anchor.mts",
     "flow": "tsx scripts/run-flow.mts",
     "e2e:long": "npm run build:ext && tsx scripts/e2e-longflow.mts"
   },

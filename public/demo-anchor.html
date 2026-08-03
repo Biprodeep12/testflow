@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TestFlow — anchored selector fixture</title>
+    <style>
+      body { font: 14px/1.5 ui-monospace, Menlo, monospace; margin: 24px; }
+      section { border: 1px solid #ccc; border-radius: 8px; margin-bottom: 16px; padding: 12px; }
+      h2 { font-size: 13px; margin: 0 0 8px; color: #666; }
+      /* Every target is EMPTY of text on purpose. An element with text of its own
+         gets an accessible name from it, which clears the fragile chip before any
+         of this is reached — so a text-bearing target would prove nothing here. */
+      .target { background: #eef; border: 1px dashed #88a; min-height: 44px; padding: 8px; cursor: pointer; }
+      .inner { background: #fff; border: 1px solid #ddd; height: 12px; margin: 3px 0; }
+      .icon { display: block; height: 12px; width: 12px; background: #999; }
+      /* Deliberately shaped like a CSS-in-JS name: nothing may be built on it. */
+      .css-1x2y3z { padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>Anchored selectors</h1>
+    <p>
+      Every target is an element that describes itself badly — no id, no test hook,
+      no accessible name, no text. What differs is what sits around it. Driven by
+      <code>scripts/e2e-anchor.mts</code>.
+    </p>
+
+    <!-- A. Anchor above, single child. The baseline. -->
+    <section>
+      <h2>A — durable ancestor, one child</h2>
+      <div class="outer parent" data-testid="case-a">
+        <div class="target"><div class="inner child"></div></div>
+      </div>
+    </section>
+
+    <!-- B. Two identical children. NOT ambiguous: they share one parent. -->
+    <section>
+      <h2>B — two identical children under the target</h2>
+      <div class="outer parent" data-testid="case-b">
+        <div class="target">
+          <div class="inner child"></div>
+          <div class="inner child"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- C. A sibling before the target, so its position shifts. -->
+    <section>
+      <h2>C — sibling before the target</h2>
+      <div class="outer parent" data-testid="case-c">
+        <div class="random element"></div>
+        <div class="target"><div class="inner child"></div></div>
+      </div>
+    </section>
+
+    <!-- D. Both together. -->
+    <section>
+      <h2>D — sibling before, and two identical children</h2>
+      <div class="outer parent" data-testid="case-d">
+        <div class="random element"></div>
+        <div class="target">
+          <div class="inner child"></div>
+          <div class="inner child"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- E. Repeated rows: the shape where naming the target by its child really is
+         ambiguous. Record-time validation must drop such a candidate rather than
+         emit one that resolves to the wrong row. -->
+    <section>
+      <h2>E — repeated rows under one anchor</h2>
+      <div class="outer parent" data-testid="case-e">
+        <div class="target"><div class="inner child"></div></div>
+        <div class="target"><div class="inner child"></div></div>
+      </div>
+    </section>
+
+    <!-- F. Nothing durable anywhere above or below: must stay fragile. -->
+    <section>
+      <h2>F — nothing durable in the neighbourhood</h2>
+      <div class="css-1x2y3z">
+        <div class="css-1x2y3z">
+          <div class="target"><div class="css-1x2y3z"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- G. Icon button: anonymous element, named child. The :has() case. -->
+    <section>
+      <h2>G — named by what it contains</h2>
+      <div class="css-1x2y3z">
+        <div class="target"><span class="icon" data-testid="icon-trash"></span></div>
+      </div>
+    </section>
+
+    <!-- H. A hand-written id on the element itself: must NOT be called fragile.
+         This is the false positive the old check produced. -->
+    <section>
+      <h2>H — stable id on the element</h2>
+      <div class="css-1x2y3z">
+        <div class="target" id="checkout-panel"></div>
+      </div>
+    </section>
+
+    <!-- I. A framework-minted id: must still be called fragile. -->
+    <section>
+      <h2>I — generated id on the element</h2>
+      <div class="css-1x2y3z">
+        <div class="target" id=":r3:"></div>
+      </div>
+    </section>
+  </body>
+</html>

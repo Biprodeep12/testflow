@@ -139,6 +139,52 @@ tie-break during consensus resolution and drives which locator Playwright codege
 3. Stable attributes: `input[name=…]`, `[placeholder=…]`, `a[href=…]`, `[title=…]`
 4. Structure: CSS path, `xpath/…`, `pierce/…` (shadow-piercing)
 5. `text/<first 25 chars>` — leaf elements only
+6. Anchored paths — **only** when 1–5 produced nothing durable (§4.1a)
+
+**Generated strings are filtered out first.**
+[`isStableId`/`isStableClass`](src/shared/selectors.ts) reject React `useId` values
+(`:r3:`), component-library counters (`mui-1234`), hashes, uuids, CSS-in-JS class names
+(`css-1x2y3z`) and CSS-modules suffixes (`Button_root__a1b2c`). A selector built on one
+of those resolves perfectly today and is worth nothing next render. Two consequences:
+[`ancestorPath`](extension/src/content/recorder.ts#L132) terminates only at a *stable*
+id, and [`cssFrom`](extension/src/content/recorder.ts#L146) tries the id **before** the
+class list — the old order preferred `div.css-1x2y3z` over a hand-written id sitting on
+the same element.
+
+Utility classes (`flex`, `px-4`) are deliberately kept: they are stable strings, merely
+shared, and `resolvesTo` already rejects a selector they cannot pin down. Deciding by
+name which of `card` and `flex` is semantic is not a job for a regex.
+
+### 4.1a Anchored selectors
+
+An absolute path is fragile mostly in its **prefix** — providers, layout wrappers and
+portals get inserted near the root, rarely between a row and its button. When an element
+offers nothing durable of its own,
+[`anchoredPaths`](extension/src/content/recorder.ts) re-expresses the path from the
+nearest ancestor that has a handle, in two variants that break differently:
+
+| Variant | Example | Survives | Breaks on |
+|---|---|---|---|
+| strict | `[data-testid="row"] > div:nth-of-type(2)` | churn above the anchor | a wrapper inserted inside it |
+| loose | `[data-testid="row"] div:nth-of-type(2)` | wrapper insertion | a second matching subtree under it |
+
+[`containsPaths`](extension/src/content/recorder.ts) covers the reverse case — the
+anonymous element with a named child — as `div:has(> [data-testid="icon-trash"])`. It is
+second because a clicked element's descendants are usually presentational: naming a
+button by its icon breaks when the icon is swapped, for a button that never changed.
+
+Three properties keep this safe:
+
+- **Ambiguity is measured, not reasoned about.** Candidates go through the same
+  `resolvesTo` gate as everything else. Repeated rows whose child selector is not unique
+  produce no `:has()` group at all — `demo-anchor` case E asserts exactly that.
+- **Additional groups, never replacements.** Consensus outvotes whichever goes stale.
+- **Cold path.** Gated on `isPositionalOnly`, so only elements that would have been
+  marked fragile pay for it. `demo-heavy`: 23ms → 24ms per step.
+
+`anchorHandle` accepts a wider set than the chip credits — a unique non-generated class
+is a better prefix than a `:nth-of-type` chain, but it is not evidence anyone thought
+about testability, so it improves the selector without clearing the warning.
 
 Three performance decisions are load-bearing, because this runs synchronously inside the
 page's own click handler:
@@ -638,5 +684,6 @@ misaligned flow still replays by position, it just cannot be trusted.
 | The debugger infobar | shown during replay only; attaching during recording would alter the viewport being measured |
 | Subframe `waitForExpression` skips CDP | `Runtime.evaluate` targets the main frame; the content script handles subframes |
 | Uploads over 256 KB | name kept, bytes dropped, `degraded: "upload-truncated"` |
+| Anchoring can only raise the floor | if nothing in the element's neighbourhood is durable, it moves the fragility one hop up — the chip still fires, correctly (`degraded: "positional-only"`) |
 | One session at a time | by design — `startSession` stops any existing one |
 | Bridge only runs on listed origins (`localhost:3000`, the Vercel deployment) | manifest `matches` — exact hosts, so Vercel previews need adding explicitly |

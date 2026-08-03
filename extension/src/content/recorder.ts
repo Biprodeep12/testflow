@@ -35,6 +35,11 @@ const CURSOR_GLIDE_MS = 420;
 import { resolveInPage } from "../../../src/shared/resolve";
 import { captureEnv, capturePermissions } from "../../../src/shared/env";
 import { evaluateKnownExpression } from "../../../src/shared/expressions";
+import {
+  isPositionalOnly,
+  isStableClass,
+  isStableId,
+} from "../../../src/shared/selectors";
 
 let mode: TabMode = "off";
 let stepCount = 0;
@@ -133,7 +138,10 @@ function ancestorPath(el: Element): PathNode[] {
   const path: PathNode[] = [];
   let node: Element | null = el;
   while (node && node.nodeType === 1) {
-    if (node.id) {
+    // Only a STABLE id terminates the walk. Stopping at a generated one anchored
+    // both the CSS path and the XPath to a string that changes next render — the
+    // walk was cheaper and the selector was worthless.
+    if (node.id && isStableId(node.id)) {
       path.push({ tag: node.tagName.toLowerCase(), nth: 0, id: node.id });
       break;
     }
@@ -144,14 +152,19 @@ function ancestorPath(el: Element): PathNode[] {
 }
 
 function cssFrom(el: Element, path: PathNode[]): string {
-  if (el.classList.length > 0) {
-    const classes = Array.from(el.classList).slice(0, 3).map(cssEsc);
-    const short = `${el.tagName.toLowerCase()}.${classes.join(".")}`;
-    if (resolvesTo(short, el)) return short;
-  }
-  if (el.id) {
+  // Id FIRST. This used to try classes first, which on a CSS-in-JS or utility-class
+  // app prefers `div.css-1x2y3z` — the least durable string on the page — over a
+  // hand-written id sitting on the same element that would have outlived it.
+  if (el.id && isStableId(el.id)) {
     const byId = `#${cssEsc(el.id)}`;
     if (resolvesTo(byId, el)) return byId;
+  }
+  if (el.classList.length > 0) {
+    const classes = Array.from(el.classList).filter(isStableClass).slice(0, 3).map(cssEsc);
+    if (classes.length > 0) {
+      const short = `${el.tagName.toLowerCase()}.${classes.join(".")}`;
+      if (resolvesTo(short, el)) return short;
+    }
   }
   const parts: string[] = [];
   for (const node of path) {
@@ -202,6 +215,163 @@ function resolvesTo(selector: string, el: Element): boolean {
 }
 
 const TESTID_ATTRS = ["data-testid", "data-test", "data-test-id", "data-cy", "data-qa"];
+
+/* ---------------------------------------------------------------- *
+ * Anchored selectors — the fallback for elements that describe themselves badly
+ * but sit next to something that describes itself well.
+ *
+ * An absolute path is fragile mostly in its PREFIX: providers, layout wrappers,
+ * theme divs and portals get inserted near the root, rarely between a row and its
+ * button. Re-expressing the path from the nearest ancestor that has a durable
+ * handle therefore buys real durability for free — the suffix still pins the
+ * element exactly, so nothing can become ambiguous that was not already.
+ *
+ * The reverse direction (naming an element by what it CONTAINS) genuinely can be
+ * ambiguous, and it is weaker in principle too: a clicked element's descendants
+ * are usually presentational, so swapping an icon would break a selector for a
+ * button that never changed. It is offered second, and only from durable children.
+ *
+ * Ambiguity is not reasoned about case by case — every candidate goes through the
+ * same `resolvesTo` gate as everything else, so one that lands on the wrong
+ * element is simply dropped. And these are ADDITIONAL groups, never replacements:
+ * consensus resolution outvotes whichever of them goes stale first.
+ * ---------------------------------------------------------------- */
+
+/** Walk no further than this looking for an anchor — deep trees are not free. */
+const ANCHOR_MAX_HOPS = 8;
+/** Cap on `:has()` candidates; they are the expensive ones to evaluate. */
+const HAS_MAX_CANDIDATES = 4;
+/** Children scanned when looking for something to hang a `:has()` off. */
+const HAS_MAX_SCAN = 20;
+
+/**
+ * The most durable CSS handle this element offers, or null.
+ *
+ * CSS specifically: an anchored path is a plain selector string that both replay
+ * engines resolve with `document.querySelector`, so an anchor has to be
+ * expressible in CSS. That rules out the `aria/` engine form but not the
+ * `[aria-label="…"]` attribute it is usually derived from.
+ *
+ * Deliberately the same bar `isPositionalOnly` applies — a handle that would not
+ * clear the fragile chip is not worth anchoring to, because an anchored path is
+ * exactly as durable as its anchor and no more.
+ */
+function durableHandle(el: Element): string | null {
+  for (const attr of TESTID_ATTRS) {
+    const value = el.getAttribute(attr);
+    if (value) {
+      const selector = `[${attr}="${attrEsc(value)}"]`;
+      return resolvesTo(selector, el) ? selector : null;
+    }
+  }
+  if (el.id && isStableId(el.id)) {
+    const selector = `#${cssEsc(el.id)}`;
+    if (resolvesTo(selector, el)) return selector;
+  }
+  const label = el.getAttribute("aria-label");
+  if (label) {
+    const selector = `[aria-label="${attrEsc(label)}"]`;
+    if (resolvesTo(selector, el)) return selector;
+  }
+  const tag = el.tagName.toLowerCase();
+  const nameAttr = el.getAttribute("name");
+  if (nameAttr && (tag === "input" || tag === "select" || tag === "textarea" || tag === "button")) {
+    const selector = `${tag}[name="${attrEsc(nameAttr)}"]`;
+    if (resolvesTo(selector, el)) return selector;
+  }
+  return null;
+}
+
+/**
+ * A handle worth ANCHORING to, which is a wider question than a handle worth
+ * clearing the fragile chip for.
+ *
+ * A unique, non-generated class is a better prefix than a chain of
+ * `:nth-of-type` — layout churn above it no longer matters — so it is used here.
+ * It is deliberately NOT accepted by `hasDurableRoot`: a class is evidence of
+ * styling, not of someone thinking about testability, and a chip that cleared on
+ * `.row > div` would be reporting durability the selector does not have. The two
+ * questions have different answers and now have different functions.
+ */
+function anchorHandle(el: Element): string | null {
+  const strong = durableHandle(el);
+  if (strong) return strong;
+  if (el.classList.length > 0) {
+    const classes = Array.from(el.classList).filter(isStableClass).slice(0, 3).map(cssEsc);
+    if (classes.length > 0) {
+      const selector = `${el.tagName.toLowerCase()}.${classes.join(".")}`;
+      if (resolvesTo(selector, el)) return selector;
+    }
+  }
+  return null;
+}
+
+/** One hop of a relative path: the same descriptor the absolute path uses. */
+function stepFor(node: Element): string {
+  const tag = node.tagName.toLowerCase();
+  const nth = nthOfType(node);
+  return nth > 0 ? `${tag}:nth-of-type(${nth})` : tag;
+}
+
+/**
+ * The element's path re-expressed from the nearest ancestor with a durable handle.
+ *
+ * Two variants per anchor, because they break differently and therefore vote
+ * independently:
+ *
+ *   strict — `<anchor> > a > b > c`   survives churn above the anchor, breaks if a
+ *                                     wrapper is inserted inside it
+ *   loose  — `<anchor> c`             survives wrapper insertion, breaks if a second
+ *                                     matching subtree appears under the anchor
+ */
+function anchoredPaths(el: Element): string[] {
+  const steps: string[] = [];
+  const self = stepFor(el);
+  let node: Element | null = el.parentElement;
+
+  for (let hop = 0; node && hop < ANCHOR_MAX_HOPS; hop++) {
+    const tag = node.tagName.toLowerCase();
+    if (tag === "body" || tag === "html") break;
+    const handle = anchorHandle(node);
+    if (handle) {
+      const strict = [handle, ...steps, self].join(" > ");
+      const loose = `${handle} ${self}`;
+      return strict === loose ? [strict] : [strict, loose];
+    }
+    steps.unshift(stepFor(node));
+    node = node.parentElement;
+  }
+  return [];
+}
+
+/**
+ * The element named by what it contains — for the case where the thing you clicked
+ * is anonymous but the icon or label inside it is not.
+ */
+function containsPaths(el: Element): string[] {
+  const out: string[] = [];
+  const tag = el.tagName.toLowerCase();
+
+  let scanned = 0;
+  for (const child of el.children) {
+    if (scanned++ >= HAS_MAX_SCAN || out.length >= HAS_MAX_CANDIDATES) break;
+    const handle = anchorHandle(child);
+    if (handle) out.push(`${tag}:has(> ${handle})`);
+  }
+
+  // One level looser, for the icon inside the span inside the button. Scoped to
+  // this element's own subtree, so the search is bounded by the element, not the
+  // document.
+  if (out.length < HAS_MAX_CANDIDATES) {
+    for (const attr of ["data-testid", "aria-label"]) {
+      const inner = el.querySelector(`[${attr}]`);
+      if (!inner) continue;
+      const handle = durableHandle(inner);
+      if (handle) out.push(`${tag}:has(${handle})`);
+    }
+  }
+  return out;
+}
 
 /**
  * As many independent descriptions of the element as it offers. Ordered most-durable
@@ -274,6 +444,17 @@ function describeElement(el: Element): string[][] {
   if (el.childElementCount === 0) {
     const text = norm(el.textContent);
     if (text && text.length <= 60) out.push([`text/${text.slice(0, 25)}`]);
+  }
+
+  // 6. Anchored fallbacks, for elements that offered nothing but their position.
+  //
+  // A COLD path on purpose. Walking for an anchor and evaluating `:has()` is the
+  // most expensive thing in this file, and this all runs synchronously inside the
+  // page's own click handler — so the cost is paid only by the elements that would
+  // otherwise have been recorded as fragile, which is where it buys something.
+  if (isPositionalOnly(out)) {
+    for (const selector of anchoredPaths(el)) push(selector);
+    for (const selector of containsPaths(el)) push(selector);
   }
   return out;
 }
@@ -383,24 +564,6 @@ function captureScrollState(): ScrollRecord[] {
     });
   }
   return out;
-}
-
-/**
- * True when the element offered nothing but its position in the tree. Such a step
- * replays correctly today and breaks on the next markup change, so the recording
- * says so rather than letting replay discover it.
- */
-function isPositionalOnly(selectors: string[][]): boolean {
-  return selectors.every((group) => {
-    const selector = group[0] ?? "";
-    return (
-      !selector.startsWith("aria/") &&
-      !selector.startsWith("text/") &&
-      !selector.startsWith("[data-") &&
-      !selector.includes("[name=") &&
-      !selector.includes("[placeholder=")
-    );
-  });
 }
 
 function record(step: FlowStep, el?: Element, extra?: Partial<StepMeta>): void {

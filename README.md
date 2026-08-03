@@ -147,6 +147,15 @@ npm run e2e:replay   # replays steps through the extension bridge
 npm run e2e:runner   # replays a flow through Playwright: frames, popups, routes, parity
 npm run e2e:cli      # the round trip a user takes: record → export bundle → npm run flow
 npm run e2e:long     # 200 steps: per-step cost, sidecar alignment at length, replay
+npm run e2e:anchor   # anchored selectors and the fragile chip, on hostile markup
 ```
 
-The E2E suites need `npm run dev` up on :3000. 212 checks in total.
+The E2E suites need `npm run dev` up on :3000, **with auth off** — they drive the
+dashboard as an anonymous user, so the sign-in wall blocks them:
+
+```bash
+NEXT_PUBLIC_FIREBASE_API_KEY= NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN= \
+NEXT_PUBLIC_FIREBASE_PROJECT_ID= npm run dev
+```
+
+242 checks in total (56 unit, 186 end-to-end).

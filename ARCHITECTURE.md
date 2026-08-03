@@ -1,734 +1,689 @@
-# TestFlow — Architecture & Flow Plan
+# TestFlow — Architecture
 
-**Last updated:** 2026-07-31
+**Status:** describes the system as built. **Last updated:** 2026-08-04
 
-# v3 (current plan): Chrome extension recorder
+Companion documents, so this one does not repeat them:
 
-The snippet/bookmarklet approach (v2) works but has structural limits: bookmarklets die
-on hard navigations and under strict CSP, cross-origin iframes are invisible, new tabs
-the dashboard didn't open are unreachable (no `opener` channel), and a dashboard-tab
-reload loses the in-memory recording. An MV3 extension removes every one of those at the
-cost of a one-time "load the extension" step. The **flow format, storage model, flows
-UI, and codegen all stay exactly as they are** — only the capture layer changes.
+| Document | Scope |
+|---|---|
+| [EXTENSION.md](EXTENSION.md) | Extension internals, mechanism by mechanism |
+| [REPORT.md](REPORT.md) | What each build phase delivered, and the judgement calls |
+| [GUIDE.md](GUIDE.md) | Plain-English tour for someone using it |
+| [SETUP.md](SETUP.md) | Install, Firebase, sign-in, dashboard origins |
+| [UPGRADE.md](UPGRADE.md) | Weak-point audit — known gaps, prioritised |
 
-## Flow
+---
+
+## 1. The premise
+
+A recording is worth something only if replaying it means the same thing every time and
+in every engine. Two claims follow from that, and everything below is built to make
+them true:
+
+1. **A recording is not a list of actions.** It is a list of actions *plus* where each
+   one happened (tab, frame, scroll offset) *plus* the environment it happened in
+   (viewport, DPR, fonts, locale, timezone). Actions alone can be re-performed; they
+   cannot be reproduced.
+2. **Two executors, one meaning.** The in-browser replayer and the Playwright runner
+   must resolve the same step to the same element, refuse the same occluded clicks, and
+   pace the same way. Where they cannot agree, the difference is *reported*, never
+   absorbed.
+
+The corollary — repeated throughout the code — is that a silent downgrade is the worst
+possible outcome. A green step that did nothing is more expensive than a red one.
+
+---
+
+## 2. Component map
 
 ```mermaid
 flowchart LR
-    subgraph EXT["extension/ (MV3)"]
-        CS["content script<br/>recorder + replayer<br/>(same selector engine, DevTools steps)"]
-        SW["service worker<br/>tab-scoped sessions, buffer in<br/>chrome.storage.session, webNavigation"]
-        PU["popup<br/>Record / Stop / step count"]
-        BR["bridge content script<br/>runs ONLY on the dashboard origin"]
-        CS -- runtime.sendMessage --> SW
+    subgraph EXT["extension/ — MV3, esbuild, no framework"]
+        REC["recorder.ts<br/>isolated world, all frames, document_start<br/>capture · selectors · in-page replay"]
+        MW["main-world.ts<br/>MAIN world<br/>keyboard · SPA routes · dialogs · eval"]
+        SW["sw/index.ts<br/>service worker<br/>session · frame registry · replay loop"]
+        CDP["sw/cdp.ts<br/>chrome.debugger — real input"]
+        PU["popup/popup.ts<br/>record this tab · download"]
+        BR["bridge.ts<br/>dashboard origin only"]
+        REC <-->|CustomEvent| MW
+        REC <-->|chrome.runtime| SW
+        SW --> CDP
         PU --> SW
-        SW -- port --> BR
+        SW <-->|port tf-bridge| BR
     end
-    BR -- window.postMessage --> D["Dashboard page<br/>steps in React state (unchanged)"]
-    D -- "Save (explicit)" --> FS[("Firestore flows/{id}<br/>stepsJson — unchanged")]
-    FS --> RUN["Execution: in-tab replay /<br/>runner / CI — see §Execution"]
+
+    BR <-->|window.postMessage| D["Dashboard — Next.js Pages Router<br/>src/pages/index.tsx · flows/[id].tsx"]
+    D -->|explicit Save| API["/api/flows — Admin SDK"]
+    API --> FS[("Firestore flows/{id}<br/>stepsJson · metaJson · env")]
+    D -->|Download bundle| FILE[".tfflow.json"]
+    FILE --> RUN["src/runner — Playwright interpreter<br/>npm run flow"]
+    FS -.->|GET| D
 ```
 
-1. User clicks **Record** in the extension popup on *any* tab (or the dashboard's
-   Record page asks the extension to open one). Recording is **tab-scoped**: SW maps
-   `tabId → session`.
-2. Content script (auto-injected on every page, `document_start`, `all_frames`)
-   captures interactions as DevTools-format steps — the selector engine and step
-   shapes from `public/tf-recorder.js` move over nearly verbatim.
-3. Steps go to the service worker (`chrome.runtime.sendMessage`), which buffers them
-   in `chrome.storage.session` (MV3 workers get evicted after ~30s idle — module-level
-   memory is not durable) and adds what only the browser can see:
-   `webNavigation` ground truth for `navigate`/`assertedEvents`, and new-tab tracking
-   via `tabs.onCreated` — multi-tab flows record correctly now.
-4. The **bridge** content script (matched only on the dashboard origin) relays the
-   live step stream into the dashboard page via `window.postMessage` — the dashboard's
-   existing message listener keeps working with a one-line source check change. No
-   `externally_connectable`, no hardcoded extension ID.
-5. Save stays explicit and unchanged: dashboard POSTs to `/api/flows`, steps stored as
-   `stepsJson`. The popup can also save directly (SW `fetch` to the dashboard API —
-   extensions with host permissions are exempt from CORS) and download raw JSON.
+Two executors hang off one flow format. Neither is a fallback for the other: the
+extension replays *in the user's own browser on the real site*, the runner replays
+*headless/headed in CI with a sealed network and a pinned clock*.
 
-## Repo layout
-
-`extension/` folder in this repo (a separate repo adds cross-repo type mirroring for
-zero benefit at this stage; split when it needs its own release cycle / Web Store listing):
+### Where the code lives
 
 ```
+src/
+├─ types/flow.ts        # THE contract: FlowJson, StepMeta, EnvRecord, message protocol
+├─ shared/
+│  ├─ resolve.ts        # consensus element resolver — shipped into the page by BOTH engines
+│  ├─ env.ts            # captureEnv() — run at record time AND at replay time
+│  └─ expressions.ts    # evaluate the recorder's own route assertions without eval
+├─ runner/              # Playwright interpreter (run · locate · env · determinism · types)
+├─ codegen/fromFlow.ts  # readable Playwright export (NOT the authoritative path)
+├─ pages/               # dashboard + /api/flows
+├─ lib/                 # firebase admin/client, auth, api envelope, zod schemas
+└─ components/          # Layout primitives, FlowStepList
+
 extension/
-├─ manifest.json            # MV3
-├─ build.mjs                # esbuild: bundles TS -> dist/, copies manifest
-├─ src/
-│  ├─ content/recorder.ts   # port of tf-recorder.js record+replay, minus opener logic
-│  ├─ content/bridge.ts     # dashboard-origin relay (SW port <-> window.postMessage)
-│  ├─ sw/index.ts           # sessions, buffering, webNavigation, tab tracking, save
-│  ├─ popup/{popup.html,popup.ts}
-│  └─ shared/flow.ts        # re-exports ../../src/types/flow.ts (same trick as runner)
-└─ dist/                    # load this via chrome://extensions -> Load unpacked
+├─ manifest.json        # MV3; bridge matches are the dashboard origins
+├─ build.mjs            # esbuild, 5 entry points -> extension/dist
+└─ src/{content,sw,popup,shared}
+
+scripts/                # e2e-record · e2e-replay · e2e-runner · e2e-cli · e2e-longflow · run-flow
+public/                 # demo.html, demo-frames, demo-manyframes, demo-heavy, demo-csp (E2E fixtures)
 ```
 
-Manifest essentials: `content_scripts` `<all_urls>` + `document_start` + `all_frames`,
-bridge script matched on the dashboard origin(s), permissions `storage`, `tabs`,
-`webNavigation`, `activeTab`; host_permissions `<all_urls>`. `debugger` permission is
-**deferred** to the trusted-replay phase (§Execution) — it triggers a scary banner and
-v1 doesn't need it.
-
-## What gets scrapped vs kept
-
-| Scrapped | Kept unchanged |
-|---|---|
-| Snippet / bookmarklet injection story | DevTools Recorder JSON format + `src/types/flow.ts` |
-| `window.opener` postMessage hub in the Record page | Flows list/detail pages, `/api/flows`, `stepsJson` storage |
-| Record page's `window.open` tab logic | `fromFlow.ts` Playwright codegen, runs + runner |
-| `public/tf-recorder.js` as a served file (its logic moves into the content script) | `demo.html` (E2E fixture) and both E2E suites, retargeted at the extension |
-
-Playwright can load MV3 extensions (`launchPersistentContext` +
-`--load-extension`, supported in new headless), so the E2E suites keep running
-headlessly in CI — the extension is testable the same way the agent was.
-
-## Execution of test cases — see the Q&A in the conversation / table below
-
-Recording and execution are now fully decoupled: the extension produces flows; anything
-that speaks the DevTools format (or the generated Playwright) can execute them.
-
-| Engine | Where it runs | Headed? | Cost | Fit |
-|---|---|---|---|---|
-| In-tab replay (content script) | user's browser | yes (visibly) | free | quick "does it still work" checks; synthetic events |
-| Trusted replay (`chrome.debugger`) | user's browser | yes | free | phase 2: real CDP input, closes the `isTrusted` gap without any server |
-| **`@puppeteer/replay`** | any Node box / CI | headless | free | runs the saved JSON **natively, zero codegen** |
-| Playwright via local runner | dev machine | yes | free | already built ("Run with Playwright") |
-| **GitHub Actions** | GitHub's runners | headless | free tier | scheduled runs + artifacts + no infra — the natural v4 for "scheduled testing" |
-| Managed browsers (Browserbase / Browserless / Steel) | their cloud | live-view URL | metered | embedded live view in the dashboard |
-| Checkly | their cloud | headless | free tier | Playwright checks on a schedule with alerting, API-driven |
-| Vercel function + `playwright-core` + `@sparticuz/chromium` | Vercel | headless only | — | short smoke checks only; see limits in the Q&A |
-
-## Build order
-
-| Milestone | Deliverable |
-|---|---|
-| **E1** | Extension skeleton: manifest, esbuild, popup Record/Stop, content script logs steps |
-| **E2** | Selector engine + full capture ported; SW buffering in `chrome.storage.session` |
-| **E3** | `webNavigation` navigate/assertedEvents + multi-tab tracking |
-| **E4** | Bridge → dashboard live stream; Record page rewritten to "extension status + live steps"; save path |
-| **E5** | In-tab replay driven from the flow page through the extension (works on any site now) |
-| **E6** | E2E suites retargeted (Playwright loads the extension); scrap v2 files |
-| **E7** | Trusted replay via `chrome.debugger` (optional) |
-| **E8** | Scheduled execution backend (GitHub Actions or managed — decision pending) |
+`extension/src/shared/flow.ts` is a five-line re-export of [src/types/flow.ts](src/types/flow.ts),
+and the content script imports `src/shared/resolve.ts` and `src/shared/env.ts` directly
+across the folder boundary. That is deliberate: one contract, no mirroring.
 
 ---
 
-# v2 (superseded by v3): client-side recording, DevTools Recorder format
+## 3. The data model
 
-The architecture pivoted after v1 was built. What changed and why:
+[src/types/flow.ts](src/types/flow.ts) defines everything. A flow is three things
+side by side, and the split is the whole design:
 
-| | v1 (runner-recorded) | v2 (current) |
+```
+FlowJson {
+  title, timeout          the DevTools document
+  steps: FlowStep[]       ← the recording model. Byte-compatible with Chrome DevTools
+                            Recorder / @puppeteer/replay after exportSteps()
+  meta:  StepMeta[]       ← sidecar, one per step: WHERE it ran and what it needed
+  env:   EnvRecord        ← sidecar, once: the environment it ran in
+}
+```
+
+**Why sidecars rather than richer steps.** Keeping `steps` pure means a TestFlow
+recording imports into Chrome DevTools and runs under `@puppeteer/replay` unmodified.
+Everything replay needs beyond "do this action" rides alongside it. Two exports fall
+out of that for free:
+
+| Export | Contents | Consumer |
 |---|---|---|
-| Browser | Playwright launches a Chromium **window** | Dashboard `window.open`s a **tab** of the user's own browser |
-| Injection | `addInitScript` (works on any site) | Snippet on the site under test, or a bookmarklet |
-| Transport | CDP binding → runner → API → Firestore | `postMessage` tab → dashboard, **in-memory state only** |
-| Storage | every event streamed to Firestore | **nothing saved until the user clicks Save**; then one `flows/{id}` doc |
-| Format | custom `RecordedEvent` | **Chrome DevTools Recorder JSON** exactly (`aria/`/`xpath/`/`pierce/`/`text/` selector groups, offsets, `assertedEvents`) — interoperable with DevTools and `@puppeteer/replay` |
-| Replay | Playwright via runner | **In-browser**: the same agent executes steps in a fresh tab (synthetic events, React-safe value setters). Playwright via runner remains as the optional "run it for real" path. |
+| `.json` — `exportSteps()` | steps only, TestFlow-only fields stripped (`timestamp`, `tagName`, `id`) | DevTools, `@puppeteer/replay`, anything speaking the format |
+| `.tfflow.json` — `toBundle()` | steps + meta + env | `npm run flow` — the runner |
 
-The physics that shaped v2: a web page cannot inject into a cross-origin tab
-(same-origin policy — DevTools Recorder can only because it *is* the browser), so the
-agent must already be in the page (snippet/bookmarklet), and `postMessage` is the one
-channel a dashboard has to a tab it opened. Trade-off accepted: hard navigations kill a
-bookmarklet-injected agent (snippet survives), and strict CSP can block the bookmarklet.
+**Step/sidecar pairing is checked, not assumed.** Both carry a matching id
+(`step.id` / `meta.stepId`), stamped in the single place allowed to append to either
+([extension/src/sw/index.ts](extension/src/sw/index.ts) `pushStep`). `metaResolver()`
+pairs by id and falls back to position; `alignmentProblems()` reports drift as a run
+warning rather than throwing, because a misaligned flow still replays — it just cannot
+be trusted about *which tab and frame* each step belonged to.
 
-Key files: [public/tf-recorder.js](public/tf-recorder.js) (in-page agent: record +
-replay), [src/types/flow.ts](src/types/flow.ts) (format + postMessage protocol),
-[src/pages/index.tsx](src/pages/index.tsx) (hub), [src/pages/flows/](src/pages/flows/)
-(saved flows + in-tab player), [src/codegen/fromFlow.ts](src/codegen/fromFlow.ts)
-(flow → Playwright). Verified end-to-end headlessly: `npm run e2e` and
-`npm run e2e:replay`.
+**Three TestFlow additions to the step vocabulary**, each because the DevTools schema
+cannot express it:
 
-The runner (`runner/`) is now only the optional Playwright execution engine ("Run with
-Playwright" on a flow). Its v1 recording mode and the `sessions`/`testcases` API
-routes still exist server-side but have no UI; strip them once the v2 flow settles.
-
-Everything below is the v1 design document, kept for the reasoning that still applies
-(runner constraints §10, Firestore discipline §8, quota notes).
+- `wheel` — wheel input the page *consumed* instead of scrolling (map zoom, carousels,
+  canvas apps). No scroll event ever fires, so nothing else can see it.
+- `drag` — a pointer drag with the sampled cursor path, so replay retraces the movement
+  rather than teleporting from start to end.
+- `button: "secondary"` on `click` — right-click. (This one *is* a native DevTools field.)
 
 ---
 
-# v1 design (superseded where it conflicts with the table above)
+## 4. Recording
 
-Start a recording session from the dashboard → a real browser opens with a recorder injected →
-the user browses normally → events stream back live → convert to Playwright code → replay it live.
+Capture lives in [extension/src/content/recorder.ts](extension/src/content/recorder.ts),
+injected at `document_start` into every frame of every page, and **inert** until the
+service worker sets its mode. Browsing normally costs nothing.
 
----
+### 4.1 Trust gate
 
-## 1. The one constraint that shapes everything
+Every capture listener is on the **capture phase** and requires `event.isTrusted`.
+Capture-phase means the step is already recorded before the page's own handler runs —
+which is what lets a dialog or a download be attached to the step that caused it.
+There is exactly one deliberate exception, documented at the call site: file inputs,
+because picking a file produces no trusted `change` under automation and a page cannot
+open a file picker unprompted.
 
-The flow as drawn has a step that can't be built literally:
+### 4.2 Selector engine
 
-> Opens a new browser tab/window → Injects your recorder script
+`describeElement()` produces **as many independent descriptions as the element offers**,
+ordered most-durable first. The order matters three times over: it is the tie-break in
+consensus resolution, it drives which locator the Playwright export prefers, and it is
+what the fragility check reads.
 
-A `window.open()` from your dashboard returns a handle to a **cross-origin** window. The same-origin
-policy blocks you from touching its DOM, adding listeners, or injecting anything. This is the exact
-wall that makes recorders ship as browser extensions in the first place. There is no flag, header,
-or trick that opens it from a normal web page.
-
-Two ways through, both of which preserve your flow exactly:
-
-| | How | Trade-off |
+| Rank | Source | Example |
 |---|---|---|
-| **A. Browser you control (CDP)** | Dashboard tells a Playwright process to launch Chromium with the recorder pre-injected via `addInitScript`. It's *your* browser, so injection is allowed on every page and frame. | Needs a process outside Vercel. **This is the plan.** |
-| **B. Reverse proxy** | Serve the target site through your own domain, rewrite HTML/JS/URLs, inject the recorder. Now it's same-origin. | Breaks on CSP, cookies, OAuth redirects, service workers, most SPAs. Endless whack-a-mole. Rejected. |
+| 1 | test hooks — `data-testid`, `data-test`, `data-test-id`, `data-cy`, `data-qa` | `[data-testid="cart"]` |
+| 2 | accessible name | `aria/Add to cart` |
+| 3 | stable attributes — `name` (form controls), `placeholder`, `a[href]`, `title` | `input[name="email"]` |
+| 4 | structure — CSS path, XPath, shadow-piercing CSS (one ancestor walk) | `div:nth-of-type(2) > button` |
+| 5 | visible text, leaf elements only | `text/Continue` |
+| 6 | **anchored paths** — only when 1–5 produced nothing durable | `[data-testid="row"] > div:nth-of-type(2)` |
 
-Option A splits into two deployments of the same idea:
+**Ids and classes are filtered before use.** [src/shared/selectors.ts](src/shared/selectors.ts)
+rejects framework-minted ids (`:r3:`, `mui-1234`, hashes, uuids) and generated class
+names (`css-1x2y3z`, `Button_root__a1b2c`) — a selector built on one resolves perfectly
+today and is worth nothing after the next render. Utility classes (`flex`, `px-4`) are
+deliberately *not* filtered: they are stable strings, they are merely shared, and the
+uniqueness gate already rejects a selector they cannot pin down. The ancestor walk
+likewise terminates only at a *stable* id, and `cssFrom` tries the id before the class
+list rather than after — on a CSS-in-JS app the old order preferred the least durable
+string on the page.
 
-- **Local session (Phase 1)** — the browser opens as a real window **on the user's own machine**.
-  A genuine "new browser window opens" — which is literally what your diagram says. No live view
-  needed; the user just browses. Ships fastest, and it can reach `localhost` apps under test.
-- **Hosted session (Phase 2)** — the browser runs in a container; the dashboard embeds an
-  *interactive* live view (noVNC) so the user browses inside the dashboard tab.
+Two performance rules hold this on the interaction path: `resolvesTo()` uses
+`querySelector` (short-circuits) rather than `querySelectorAll().length === 1` (walks
+the document, allocates a NodeList — per candidate, per step, inside a click handler);
+and `ancestorPath()` is walked **once** for both the CSS and XPath builders. Anything
+over `SLOW_STEP_MS` (120 ms) prints a breakdown to the console — recording runs inside
+the page's own handlers, so slow here *is* a sluggish page, and a measurement beats a
+hunch.
 
-Same recorder, same event schema, same driver interface. Phase 2 is a swapped implementation, not a
-rewrite.
+### 4.2a Anchored selectors
 
-**What the pivot buys you:** the browser-control layer needed for test *playback* now also does the
-*recording*. One piece of infrastructure, two modes. And multi-tab flows — which were flatly out of
-scope with an extension — come almost free, because CDP sees every popup the session opens.
+An absolute path is fragile mostly in its **prefix**. Providers, layout wrappers, theme
+divs and portals get inserted near the root; rarely between a row and its button. So
+when ranks 1–5 yield nothing durable, the recorder re-expresses the path from the
+nearest ancestor that *does* have a handle:
+
+```
+absolute:  section:nth-of-type(3) > div > div:nth-of-type(2)
+strict:    [data-testid="case-c"] > div:nth-of-type(2)
+loose:     [data-testid="case-c"] div:nth-of-type(2)
+```
+
+Both variants are emitted because they break differently — strict dies if a wrapper is
+inserted inside the anchor, loose dies if a second matching subtree appears under it —
+and consensus resolution lets them vote independently. The reverse direction is also
+tried, for the anonymous element with a named child: `div:has(> [data-testid="icon-trash"])`.
+
+Three properties make this safe rather than clever:
+
+- **Ambiguity is not reasoned about, it is measured.** Every candidate goes through the
+  same `resolvesTo` gate as everything else, so one that lands on the wrong element is
+  dropped. Repeated rows whose child selector is not unique simply produce no `:has()`
+  group.
+- **These are additional groups, never replacements.** Whichever goes stale first is
+  outvoted by the rest.
+- **It is a cold path.** Walking for an anchor and evaluating `:has()` is the most
+  expensive thing in the file, and it runs only for elements that would otherwise have
+  been recorded as fragile. Measured on `demo-heavy`: 23 ms → 24 ms per step.
+
+Anchoring accepts a wider set of handles than the fragile chip credits — a unique,
+non-generated class makes a better prefix than a chain of `:nth-of-type`, but it is not
+evidence that anyone thought about testability, so `.row > div` improves the selector
+without clearing the chip. The two questions have different answers and different
+functions (`anchorHandle` vs `hasDurableRoot`).
+
+### 4.3 What each event produces
+
+| Input | Step | Handling worth knowing |
+|---|---|---|
+| `click` / `contextmenu` / `dblclick` | `click` / `click{button:secondary}` / `doubleClick` | tail click of a drag is suppressed for 200 ms |
+| `change` | `change` | one step per committed edit. Passwords record `value: ""` + `meta.secretRef` |
+| file input | `change` + `meta.upload` | bytes carried base64, capped at 256 kB |
+| `keydown`/`keyup` | `keyDown`/`keyUp` | modifiers emitted **lazily** — Shift-while-typing stays silent, Ctrl+B records the full hold |
+| wheel burst | `scroll` **or** `wheel` | if no scroll event landed during the burst, it was consumed → `wheel` |
+| pointer drag / HTML5 drag | `drag` | `dragend` is the only end signal for a native drag; `meta.nativeDrag` records which it was |
+| scroll | `scroll` | recorded only inside a short window after real wheel/touch/key input |
+| page load | `setViewport` + `navigate` (first) / `assertedEvents` on the causing step (later) | seeded exactly as DevTools does |
+| SPA route change | `waitForExpression` on `location.pathname + location.hash` | see below |
+
+**SPA routes are the interesting one.** A `pushState` produces no page load, so the
+whole transition is invisible to a load-based recorder. [main-world.ts](extension/src/content/main-world.ts)
+patches the real `history.pushState`/`replaceState` (page functions — patching them
+from the isolated world patches a different object) and also listens to `popstate`,
+`hashchange` and the Navigation API. The route is then recorded as a **native
+`waitForExpression`** rather than a new step type: the flow model stays pure DevTools,
+both replay engines already know how to execute it, and the wait is tied to page state
+instead of a sleep. Query strings are dropped — they carry session tokens and
+cache-busters that differ every run.
+
+### 4.4 The sidecar
+
+Per step, from [recorder.ts](extension/src/content/recorder.ts) `record()`:
+
+- `tMono` — `performance.timeOrigin + performance.now()`, **monotonic**. Wall-clock is
+  subject to NTP steps, which can turn a 200 ms gap into a negative one; gaps are
+  exactly what "replay as recorded" paces against.
+- `rect` — geometry at action time, so "clicked, but somewhere else" is diagnosable.
+- `scrollState` — every container scrolled away from origin, each with an **anchor**:
+  what element was at the container's content top and how far past it we were. A raw
+  `scrollTop` of 4200 px means a different row once a virtualized list recycles.
+- `dialog`, `upload`, `download`, `secretRef`, `nativeDrag`, `degraded`.
+
+### 4.5 Storage shape (and the quadratic that was removed)
+
+Steps do **not** live in the session object. They are one `chrome.storage.session` key
+each (`tf-s-<id>`), so recording step *n* costs a constant-size write instead of
+rewriting the whole recording — which made a long session progressively slower to
+record. The same split applies to replay runs (`tf-run`, `tf-run-flow`,
+`tf-run-s-<index>`). Full reassembly is O(n) and happens only on connect, on save, and
+on the rare events that amend an existing step.
+
+A failed write is recorded on the session as `storageError` and surfaced in the
+dashboard **before** save. A recording that silently lost a step in the middle is worse
+than one that stopped, because it looks complete and replays as something nobody did.
 
 ---
 
-## 2. Flow
+## 5. Identity — the part that makes replay addressable
+
+### Tabs
+
+Real tab ids differ every run, so steps reference **logical targets**: `t0` is where the
+session started, `t1` the first popup it opened. Popups join the session through
+`chrome.tabs.onCreated` (checking `openerTabId`), numbered **in the order the flow opens
+them**. Replay re-binds those ids by the same rule — in the extension, and identically in
+[src/runner/run.ts](src/runner/run.ts) via `context.on("page")`. Binding when a step
+first *asks* would look equivalent and is not: a flow that opens two popups and then
+acts on the second one first would attach that step to the wrong window.
+
+### Frames
+
+A frame cannot describe itself — only the parent document can see the `<iframe>` element
+hosting it. So [frames.ts](extension/src/content/frames.ts) has every frame ask its
+parent "who am I?" over `window.postMessage` (the one channel that works cross-origin);
+the parent answers with its own chain plus the link to this child, and the chain
+terminates at the main frame, which answers `[]`.
+
+Each hop carries **two identities**, because they fail differently:
+
+| | Breaks when | Used by |
+|---|---|---|
+| `index` | frames are reordered (ad slots, lazy mounts) | native DevTools `frame` path |
+| `selectors` (of the iframe element) | the iframe element itself changes | `frameLocator()`, and preferred by both executors |
+
+Both executors try the signature first and the index second, and both **report which one
+worked** — a chain that only resolves by index is one page change away from breaking
+(`frameHow: "index"` in the runner, a step note in the extension).
+
+Frames register themselves with the service worker on every load (`cs-ready`), which is
+what lets a replay step be sent to *one* frame. Broadcasting to every frame and taking
+the fastest reply is how a step lands in the wrong document.
+
+---
+
+## 6. Replay
+
+### 6.1 Where the loop lives
+
+The orchestration loop is in the **service worker**, not the dashboard page. This is not
+a tidiness preference:
+
+- The dashboard tab is hidden the moment the replay tab takes focus, and Chrome
+  throttles a hidden page's timers toward one tick per second — which distorted "as
+  recorded" pacing and made every timeout late.
+- A dashboard reload killed the run outright, because the loop's state lived in a React
+  ref.
+
+The worker has neither problem. The dashboard is a monitor: it mints a `runId`, posts
+`startReplay` once, and renders `runProgress`/`runDone`. A page that reloads mid-run
+**rejoins** it from the snapshot every bridge connection receives. A worker evicted
+mid-run resumes from persisted state, with `index` already advanced past every completed
+step — nothing re-runs, because re-clicking "purchase" is not a recovery strategy. A
+20-second heartbeat makes eviction rare; the persisted record makes it survivable.
+
+### 6.2 Two execution paths, one meaning
 
 ```mermaid
-flowchart TB
-    U["User: enters URL, clicks Start Session"] --> API1["POST /api/sessions/start"]
-    API1 --> Q[("Firestore: session queued")]
-    Q --> R["Runner claims job"]
-    R --> L["Playwright launches Chromium (headed)<br/>+ addInitScript(recorder)<br/>+ exposeBinding(__tfEmit)"]
-    L --> B["Browser window opens at target URL"]
-    B --> BR["User browses normally"]
-    BR -- "window.__tfEmit(event)" --> R
-    BR -- "CDP: popups, dialogs, downloads, navigations" --> R
-    R -- "POST /api/runner/events (batched)" --> API2["API routes"]
-    API2 --> FS[("Firestore")]
-    FS -. "client SDK onSnapshot" .-> D["Dashboard: live event timeline"]
-    D --> G["Generate test case"] --> CODE["Playwright TS spec"]
-    CODE --> RUN["Run live"] --> R
+flowchart TD
+    S["step + meta"] --> A{"debugger attached<br/>AND physical input?"}
+    A -->|yes| L["cs-locate → the frame resolves the element<br/>and reports the point in TOP-frame coords"]
+    L --> C["chrome.debugger Input domain<br/>trusted event, real hover, real focus"]
+    A -->|no| R["cs-run → content script<br/>synthetic events + note:<br/>'real input was unavailable'"]
+    A -->|fill / scroll / waits| R
 ```
 
-1. **Enter URL + Start Session** → API writes a `queued` session doc.
-2. **Runner claims it** → launches headed Chromium with the recorder pre-injected.
-3. **Browser opens** at the target URL.
-4. **User browses normally** — real clicks, real typing, real logins.
-5. **Recorder streams events** out through a CDP binding (§4), runner batches → API → Firestore.
-6. **Dashboard updates in real time** via a Firestore `onSnapshot` subscription.
-7. **Stop Session** from the dashboard, or by closing the browser window.
-8. Convert → Playwright code → replay live.
+`dispatchEvent()` from a content script produces `isTrusted: false`, no real hover, no
+`:focus-visible`, no native scrolling — and Chrome's popup blocker refuses
+`target="_blank"` without user activation, so a popup driven by synthetic events
+*silently never opens*. Driving Chrome's Input domain over `chrome.debugger`
+([sw/cdp.ts](extension/src/sw/cdp.ts)) closes that gap; it is the same channel
+Playwright uses. Every tab in a replay gets attached, not just the first.
 
----
+The cost is stated rather than hidden: attaching shows Chrome's "started debugging this
+browser" infobar. It is attached for **replay only** — attaching during a recording would
+add that infobar to the very viewport being measured — and detached the moment the run
+ends. When attach fails (DevTools open, another debugger, policy), replay falls back to
+synthetic events and **says so** on every affected step.
 
-## 3. Repos
+`waitForExpression` also goes over the debugger, because virtually every real site ships
+a CSP without `unsafe-eval` and the page's own world therefore cannot evaluate a string
+at all. Where no debugger is available, [shared/expressions.ts](src/shared/expressions.ts)
+answers the recorder's *own* route assertions without an evaluator — they are a few
+known shapes about `location`, and comparing those needs no `eval`.
 
-The extension repo is gone. What's left:
+### 6.3 Element resolution — consensus, in one implementation
 
-| Piece | Where | Why |
+[src/shared/resolve.ts](src/shared/resolve.ts) is imported directly by the content
+script and shipped into the page as source text by the Playwright runner via
+`pageExpr()`. Two implementations would eventually resolve the same step to two
+different elements, which is precisely the divergence this system exists to remove.
+
+It resolves **every** selector group and the element **most groups agree on** wins. A
+stale positional path that now points at the wrong element is outvoted by aria/testid/text
+still agreeing on the right one — first-match-wins cannot do that. Nested hits (one group
+finds the `<button>`, another its inner `<span>`) count as agreement and keep the deeper
+element; ties break toward the earlier, more durable group.
+
+`pageExpr()` carries a `__name` shim. That is not decoration: esbuild/tsx compile with
+`keepNames`, which wraps nested function declarations in `__name(fn, "fn")` — a helper
+that exists in the bundle and not in the page. A naively serialized function throws
+`ReferenceError` the moment it runs, and `addInitScript` does not await, so it fails
+silently.
+
+### 6.4 Occlusion
+
+Real input lands on whatever is topmost at that pixel. A sticky header, cookie bar or
+chat widget over the target absorbs the click and the step "succeeds" having done
+nothing. Both executors run the same `elementFromPoint` check before dispatching, and
+both refuse the same clicks — the runner reports `E_OCCLUDED` naming the blocker, the
+extension returns the same sentence. A hit on a child or an ancestor counts as the same
+element, matching how the resolver treats nesting.
+
+### 6.5 Pacing
+
+Both speeds pace against **absolute deadlines on a timeline computed once**, never by
+sleeping the recorded gap after whatever the previous step cost. Gap-sleeping stacks
+execution overhead (locate round-trips, cursor glide, navigation settles) on top of
+every recorded pause, so total time becomes *recording + n × overhead* and long flows
+look progressively slower. Against deadlines, a step that ran long simply shortens the
+next wait.
+
+| | Gap ≤ 150 ms (input mechanics) | Gap > 150 ms (think time) |
 |---|---|---|
-| Dashboard — Next.js 16 Pages Router, API routes, Firebase Admin | `testflow` (this repo) | — |
-| Runner — Playwright process: records **and** replays | `testflow/runner/` for now | Shares the event types, the recorder source, and the codegen. Splitting it now means mirroring all three across repos for no benefit. |
+| `recorded` | kept exactly | kept, capped at 10 s |
+| `fast` | kept exactly | ×0.15, capped at 600 ms |
 
-**Split point:** when the runner gets containerized for hosted sessions (Phase 2 / M7), extract it
-to `testflow-runner` with its own Dockerfile and release cycle. Until then one repo, two
-`package.json` files — `runner/` keeps Playwright entirely out of the Next.js dependency tree.
+The mechanics floor is honoured even when the run is behind schedule: rushing a key-hold
+changes *what the page sees*, not just when. Flows recorded before timestamps existed
+get a uniform beat rather than zero — a zero-gap replay outruns debounced inputs and
+dropdown animations that always had time during recording.
 
-```
-testflow/
-├─ src/
-│  ├─ pages/
-│  │  ├─ index.tsx                    # start a session: URL input + Start button
-│  │  ├─ sessions/index.tsx           # session history
-│  │  ├─ sessions/[id].tsx            # LIVE event timeline (onSnapshot) + Stop + Generate
-│  │  ├─ testcases/[id].tsx           # step list + code editor + Run
-│  │  ├─ runs/[id].tsx                # playback: live view + step log
-│  │  └─ api/                         # §6
-│  ├─ components/
-│  │  ├─ Layout.tsx                   # shell, nav, Card/Button/ErrorNote primitives
-│  │  ├─ EventTimeline.tsx            # the live event feed
-│  │  └─ StatusBadge.tsx              # queued / launching / recording / stopped / error
-│  ├─ hooks/
-│  │  └─ usePoll.ts                   # the realtime mechanism — see §7
-│  ├─ lib/
-│  │  ├─ firebase-admin.ts            # server only, singleton + collection refs
-│  │  ├─ auth.ts                      # runner token (constant-time compare)
-│  │  ├─ api.ts                       # envelope, method guard, body validation
-│  │  ├─ client.ts                    # browser fetch helper
-│  │  └─ validate.ts                  # zod schema per request body
-│  ├─ codegen/
-│  │  ├─ normalize.ts                 # raw events -> clean steps
-│  │  ├─ selector.ts                  # pick best candidate, score brittleness
-│  │  └─ emit.ts                      # steps -> Playwright TS
-│  └─ types/
-│     ├─ events.ts                    # the shared contract
-│     └─ models.ts                    # Firestore doc shapes + step IR
-├─ scripts/
-│  └─ codegen-smoke.ts                # exercises the pipeline with no Firebase
-└─ runner/
-   ├─ package.json                    # playwright lives HERE, not in the root
-   ├─ build-recorder.ts               # esbuild -> single IIFE string for addInitScript
-   └─ src/
-      ├─ index.ts                     # claim loop: poll for queued sessions & runs
-      ├─ config.ts                    # runner/.env, no dotenv dependency
-      ├─ api.ts                       # typed client for /api/runner/*
-      ├─ record.ts                    # launch + inject + stream
-      ├─ replay.ts                    # spawn `playwright test` on a generated spec
-      ├─ shared/events.ts             # re-exports the dashboard's contract
-      └─ recorder/
-         ├─ recorder.ts               # THE INJECTED SCRIPT (runs in page context)
-         └─ selector-engine.ts        # candidate generation + scoring, in-page
-```
+### 6.6 Navigation gates
 
-Installed — root: `firebase-admin`, `zod`, `tsx`. `runner/`: `playwright`,
-`@playwright/test`, `esbuild`, `tsx`.
+Three cases, and getting them wrong is what produces "replay freezes for 15 s on some
+steps but not others":
 
-Two things the original sketch listed that were dropped: **Prettier** (the step list is
-linear, so `emit.ts` produces already-formatted source — no reformatter needed) and a
-**code-editor library** (a monospace `<textarea>` covers a read-mostly surface; add
-CodeMirror when editing becomes the main activity).
+1. **Hard load** — a new top-frame `cs-ready`. Frame-scoped on purpose: an iframe
+   announcing itself must not satisfy a navigation wait.
+2. **SPA route** — never produces a `cs-ready`. The gate also polls the tab's URL and
+   compares `pathname + hash`, exactly as the recorded assertions do.
+3. **The step that killed its own document** — the click navigated before the content
+   script could reply ("tab did not respond"). The reload's handshake is the real
+   outcome, not a failure.
 
-The `driver/` split is deferred too: with only a local driver implemented, the interface
-would be an abstraction over one case. §11 defines it; extract it when the container
-driver lands.
+A URL match alone is not sufficient for a hard load: the URL commits before the new
+document's content script exists, so the gate also probes with a no-op message. An SPA
+route's document (which never left) answers immediately; a committing hard load keeps us
+waiting.
 
 ---
 
-## 4. Recording: injection and transport
+## 7. The Playwright runner
 
-This is the core mechanism. Two Playwright calls do the heavy lifting.
+[src/runner/run.ts](src/runner/run.ts) is an **interpreter over the flow**, not generated
+code. Generated code is an export artifact — readable, editable, and necessarily a second
+implementation of replay semantics. This is the first one, and where the two disagree the
+runner is right.
 
-```ts
-const context = await chromium.launchPersistentContext(profileDir, {
-  headless: false,
-  viewport: null,          // real window size
-});
+Three rules, without exception:
 
-// 1. A callback the page can reach — bound before any navigation.
-await context.exposeBinding('__tfEmit', (source, event) => {
-  buffer.push({ ...event, pageId: pageIdOf(source.page), framePath: framePathOf(source.frame) });
-});
+- **No selector guessing** — consensus resolution, or a named failure.
+- **No blind sleeps** — every wait is tied to page state; pacing comes from recorded gaps.
+- **No action outside the recorded (target, frame).**
 
-// 2. The recorder, re-injected on every navigation, in every frame, before page scripts run.
-await context.addInitScript({ content: RECORDER_IIFE });
+It drives `page.mouse` / `page.keyboard` rather than `locator.click()` so the page sees
+trusted events with real hover and focus — and so a `nativeDrag` performs a genuine HTML5
+drag, `dataTransfer` and all, which no synthetic retrace can.
 
-const page = await context.newPage();
-await page.goto(targetUrl);
-```
+### Environment: applied, then verified
 
-**Why `exposeBinding` instead of `fetch` from the page.** The recorder runs inside the *target
-site's* origin. A `fetch` to your API from there hits two walls: CORS, and — worse — the target
-site's own `Content-Security-Policy: connect-src`, which you don't control and can't override. A
-CDP binding is a direct function call into the Node process. No network, no CORS, no CSP, no way for
-the page's policy to interfere. This is the single most important choice in the recording path.
+Applying the recorded environment is half the job. Headed Chrome silently **clamps** a
+viewport larger than the screen work area, a DPR override can be refused, and a font the
+recording used may simply not exist on this machine — all of which look like rendering
+bugs later. So [src/runner/env.ts](src/runner/env.ts) measures the live page again with
+**the same `captureEnv()` the recorder used** and reports the field-by-field delta before
+the first step. Fonts are identified by canvas-measured probe-string widths, because
+`document.fonts` only knows about webfonts and cannot tell you that "Inter" silently fell
+back to Arial.
 
-**Why `addInitScript`.** It runs before any page script on *every* navigation and *every* frame,
-including iframes and popups, for the lifetime of the context. Register once at launch and full-page
-reloads, SPA route changes, and `window.open` targets are all covered with no re-injection logic.
+### Two modes, and only one may judge appearance
 
-**CDP-level capture.** Some things the DOM can't tell you. Subscribe on the runner side and merge
-into the same stream:
-
-| Playwright event | Recorded as | Why it matters |
+| Mode | Network | Verdict on "it looked different" |
 |---|---|---|
-| `context.on('page')` | `newtab` | Popups and `target=_blank` — the multi-tab flows an extension couldn't follow |
-| `page.on('framenavigated')` | `navigate` | Ground truth for SPA and hard navigations |
-| `page.on('dialog')` | `dialog` | `alert`/`confirm`/`prompt` — needs a handler in generated code |
-| `page.on('download')` | `download` | |
-| `page.on('console')` / `pageerror` | diagnostics | Shown in the timeline, not compiled into the test |
-| `context.on('close')` | session ended | User closed the window = Stop |
+| `live` | real backend | **information, never pass/fail** — content differs run to run by definition |
+| `sealed` | every response from the recorded HAR, `notFound: "abort"` | a result |
 
-**Buffering.** Runner flushes to `/api/runner/events` at 50 events / 2s / stop, whichever is first.
-Each event carries a uuid used as the Firestore doc id, so a retried batch overwrites instead of
-duplicating.
+Sealed mode also pins the clock to each step's recorded moment (`setFixedTime`, not
+`install` — freezing `setTimeout` would break debounces and animations), seeds the page
+PRNG, makes scrolling instant, and pauses autoplaying media. Requests the archive cannot
+serve are always reported and attributed to the step that caused them: a run-level list
+says drift happened, the per-step note says where.
 
-**Note on trust.** `window.__tfEmit` is visible to the page, so a hostile site could forge events.
-Irrelevant for testing sites you own; worth remembering if this ever points at untrusted targets.
+### Failure vocabulary
 
-### What the injected recorder captures
-
-| DOM event | Recorded as | Handling |
-|---|---|---|
-| `click` | `click` | capture phase; ignore `isTrusted === false` |
-| `dblclick` / `contextmenu` | `dblclick` / `rightclick` | supersedes the preceding click(s) |
-| `input` | `input` | debounce 400ms, keep only the **final** value per element |
-| `change` on `<select>` | `select` | option value + label |
-| `change` on file input | `upload` | filename only — contents can't be replayed |
-| `keydown` | `press` | Enter, Tab, Escape, arrows, Ctrl/Cmd combos only |
-| `scroll` | `scroll` | throttle 250ms, last-per-container (mostly dropped at codegen) |
-| `submit` | `submit` | |
-| resize | `viewport` | the first one becomes the test's viewport |
-| Alt+Click | `assert` | assert mode: visible / text equals / value equals / URL |
-
-**Masking.** `input[type=password]`, `autocomplete` containing `cc-` or `one-time-code`, and
-anything in the session's redaction list record `value: null, masked: true`. Generated code emits
-`process.env.TEST_PASSWORD!` — never a literal. This matters more now than with an extension,
-because users will log into real accounts inside these sessions.
-
-### Selector engine
-
-Compute **all** candidates in-page at record time and ship the ranked list. The DOM is gone by the
-time the dashboard renders the event, so a selector that turns out brittle can't be re-derived
-later — but a stored candidate list lets the UI offer a dropdown to swap it.
-
-1. `data-testid` / `data-test` / `data-cy` → `getByTestId('x')`
-2. Role + accessible name → `getByRole('button', { name: 'Save' })`
-3. `<label>` / `aria-label` / placeholder → `getByLabel` / `getByPlaceholder`
-4. Stable `#id` — reject generated-looking ids (`/^(:r|ember|mui-|radix-)/`, long hex/uuid)
-5. Unique visible text → `getByText('…', { exact: true })`
-6. Scoped CSS path with `:nth-child` — fallback, flagged `brittle: true`
-
-Each candidate: `{ kind, value, name?, unique, score }`. Score picks the default; the rest populate
-the swap dropdown.
+Every divergence gets a code ([src/runner/types.ts](src/runner/types.ts)) — `E_OCCLUDED`,
+`E_FONT_SUBSTITUTION`, `E_SCROLLBAR`, `E_VIEWPORT_CLAMPED`, `E_FRAME_MISSING`,
+`E_SECRET_MISSING`, `E_DOWNLOAD_MISSING`, `E_CONTENT_DRIFT`, `E_DEGRADED`, … — and the
+report names exactly one per finding. "The screenshot differs" is not a usable result;
+"the recording used Inter and this machine substituted a fallback" is. Deltas carry
+`blocksParity`, and the first blocking one becomes `report.blockedBy` — what to fix
+before anything else.
 
 ---
 
-## 5. Event contract (`src/types/events.ts`)
+## 8. Degradation — what the recorder admits it cannot do
 
-Now a normal internal module — no cross-repo mirroring, since the recorder lives in this repo. Keep
-`schemaVersion` anyway; old sessions in Firestore outlive schema changes.
+These are properties of the **recording**, known before you press Run, which is when they
+are worth knowing. They surface as chips in [FlowStepList.tsx](src/components/FlowStepList.tsx),
+as notes in the extension's run, and as `E_DEGRADED` in the runner.
 
-```ts
-export const SCHEMA_VERSION = 1;
+### `positional-only` → the **fragile** chip
 
-export type SelectorCandidate = {
-  kind: 'testid' | 'role' | 'label' | 'placeholder' | 'id' | 'text' | 'css';
-  value: string;
-  name?: string;        // accessible name, for kind === 'role'
-  unique: boolean;      // matched exactly one node at record time
-  score: number;        // 0-100, higher = more durable
-};
+Set when *no* selector group the element offered is rooted in something durable — no test
+id, no accessible name, no `name=`/`placeholder=` attribute, no hand-written id, no
+visible text, and nothing durable close enough above or below to anchor a relative path
+to. All that survived is position in the tree. Such a step replays correctly today and
+breaks on the next markup change, so the recording says so rather than letting replay
+discover it.
 
-export type RecordedEvent = {
-  id: string;           // uuid — Firestore doc id, gives idempotent retries
-  seq: number;          // monotonic per session
-  ts: number;
-  pageId: string;       // which tab — set by the runner, not the page
-  framePath: number[];  // [] = top frame, [0,2] = nested iframe
-  type: 'click' | 'dblclick' | 'rightclick' | 'input' | 'select' | 'press'
-      | 'scroll' | 'submit' | 'upload' | 'viewport' | 'assert'
-      | 'navigate' | 'newtab' | 'dialog' | 'download';   // last four: CDP-sourced
-  url: string;
-  target?: {
-    selectors: SelectorCandidate[];
-    tag: string;
-    type?: string;
-    text?: string;      // trimmed, max 120 chars
-    role?: string;
-    boundingBox?: { x: number; y: number; w: number; h: number };
-  };
-  value?: string | null;
-  masked?: boolean;
-  key?: string;
-  scroll?: { x: number; y: number };
-  viewport?: { width: number; height: number };
-  dialog?: { kind: 'alert' | 'confirm' | 'prompt'; message: string; accepted: boolean };
-  assert?: { kind: 'visible' | 'hidden' | 'text' | 'value' | 'url'; expected: string };
-};
-```
+The check is [`isPositionalOnly()`](src/shared/selectors.ts) — `some`, not a per-selector
+`every`: one durable group anywhere in the list clears the flag, because consensus
+resolution can outvote the stale positional ones.
 
----
+It judges each selector's **root**, not the whole string. Testing the whole string would
+credit `div:nth-of-type(2) > [data-x]` — a positional path that happens to end somewhere
+nice, and which breaks the moment its prefix shifts. An anchored path is durable
+precisely because the durable part comes first. `:has()` is the one inversion: there the
+handle *is* the claim even though it is not the leading token.
 
-## 6. API routes (`src/pages/api/`)
+Two deliberate exclusions. `a[href="…"]` and `[title="…"]` are rank-3 stable attributes
+that do **not** clear the chip — an href is content and a title is decoration, so the
+check errs toward warning. And a class-rooted anchored path (`.row > div`) does not clear
+it either, for the reason in §4.2a.
 
-No CORS anywhere — everything is same-origin (dashboard) or server-to-server (runner). That's a real
-simplification over the extension design.
+Typical remaining causes: unlabelled icon buttons with no named child, `<div>` grids of
+unclassed `<div>`s, canvas overlays. The fix there is upstream — a `data-testid` or an
+`aria-label` — and the chip is telling you something true.
 
-**Session control (dashboard → server)**
+Typical causes: unlabelled icon buttons, `<div>`s wired as controls, generated class
+names with no text, canvas/SVG internals. The fix is upstream — a `data-testid` or an
+`aria-label` on the element.
 
-| Route | Method | Purpose |
-|---|---|---|
-| `/api/sessions/start` | POST | `{ url, name?, viewport?, redactSelectors? }` → creates a `queued` session → `{ sessionId }` |
-| `/api/sessions/[id]/stop` | POST | Flags `stopRequested`; the runner closes the browser |
-| `/api/sessions` | GET | History, paginated |
-| `/api/sessions/[id]` | GET / DELETE | Meta / cascade delete events |
-| `/api/sessions/[id]/events` | GET | Ordered by `seq` — for replay/export; the live view uses `onSnapshot` |
+### `upload-truncated`
 
-**Runner (runner ↔ server, `x-runner-token` auth)**
+A chosen file exceeded `MAX_UPLOAD_BYTES` (256 kB). Its name is kept, its bytes are not —
+a recording is not an asset store. The runner fails this step outright rather than
+uploading nothing and passing.
 
-| Route | Method | Purpose |
-|---|---|---|
-| `/api/runner/claim` | POST | Long-poll for the next `queued` session or run. Atomic claim via a Firestore transaction so two runners can't take the same job |
-| `/api/runner/session/[id]/status` | POST | `launching` → `recording` → `stopped` / `error` |
-| `/api/runner/events` | POST | Batched `RecordedEvent[]` |
-| `/api/runner/report` | POST | Playback step results and log lines |
-| `/api/runner/artifact-url` | POST | Signed Storage upload URL for trace / video |
+### Named-but-absent values
 
-**Test cases & playback**
+Password fields record `value: ""` and a `meta.secretRef` naming what is needed. Replay
+supplies it (`--secret NAME=…` or `TESTFLOW_SECRET_NAME`) or fails saying which one is
+missing. It never types the empty string and calls that a pass — that "passes" while
+logging in as nobody.
 
-| Route | Method | Purpose |
-|---|---|---|
-| `/api/testcases/generate` | POST | `{ sessionId, options }` → normalize + emit → new test case |
-| `/api/testcases` | GET | List |
-| `/api/testcases/[id]` | GET / PATCH / DELETE | PATCH saves edited code or a swapped selector |
-| `/api/runs` | POST | `{ testcaseId, headed }` → `{ runId, liveViewUrl }` |
-| `/api/runs/[id]` | GET | Status, steps, artifacts |
-| `/api/runs/[id]/stop` | POST | Cancel |
+### Reported at run time, not record time
 
-**On the claim loop.** Long-polling suits a local runner and needs no extra infrastructure. It does
-hold a Node connection open, which serverless dislikes — so cap the poll at ~25s and let the runner
-re-poll. If the runner ever moves fully hosted, swap to Cloud Tasks or a Pub/Sub push.
+- **Synthetic input** — the debugger could not attach; the run proves less than it appears
+  to, and that is the user's call to make.
+- **Frame matched by index only** — the recorded iframe selector no longer resolves.
+- **Scroll anchor gone** — restored by pixel offset, which may be a different row.
+- **Element scrolled into view** — it was outside the recorded viewport, so surrounding
+  pixels will differ.
+- **Closed shadow root hint** — when nothing matched, the runner counts custom elements
+  whose `shadowRoot` reads null while they clearly render. No engine can reach in; saying
+  so turns an hour of selector debugging into a fact.
 
 ---
 
-## 7. Realtime to the dashboard
+## 9. Dashboard, storage, and trust boundaries
 
-"Dashboard updates in real time" — the cheapest correct answer is **not** WebSockets. Vercel's
-serverless functions don't hold sockets well, and SSE through a Next.js API route is awkward there.
+### Save is explicit, and it is the only write
 
-**What's built: cursor-based polling.** The timeline requests
-`GET /api/sessions/[id]/events?since=<lastSeq>` once a second while a session is active, and
-appends whatever comes back. `usePoll` chains with `setTimeout` rather than `setInterval`, so a
-slow request can never stack overlapping polls, and it stops entirely once the session is no
-longer recording.
+Nothing reaches Firestore while recording. The dashboard holds steps in React state, fed
+by the bridge; `POST /api/flows` is the single write path, and the recording is capped at
+900 kB against Firestore's ~1 MB document limit (with the Next body parser raised to 4 MB
+so an oversized flow gets a real JSON 413 explaining itself, rather than Next's plain-text
+rejection before the handler runs).
 
-```ts
-// sessions/[id].tsx — cursor lives in a ref so the poll closure always sees the newest value
-const data = await apiFetch(`/api/sessions/${id}/events?since=${cursor.current}`);
-if (data.events.length > 0) {
-  cursor.current = data.lastSeq;
-  setEvents((previous) => [...previous, ...data.events]);
-}
-```
+Steps are stored as **one JSON string** (`stepsJson`, `metaJson`). Firestore rejects
+arrays nested directly inside arrays, and DevTools selector groups are exactly that
+(`string[][]`). Every API response and the whole UI still speak the unmodified DevTools
+shape.
 
-**Why this over the Firestore `onSnapshot` originally sketched.** The client SDK path needs
-`NEXT_PUBLIC_*` config, security rules that expose `sessions/{id}/events` for reading, and a second
-auth story — a meaningful amount of setup for a page that is only ever open while a human watches a
-browser they just launched. A one-second cursor poll is indistinguishable to that human, adds no
-config, and keeps *every* Firestore access behind the Admin SDK, which makes the deny-all rule in §8
-literally true rather than aspirational.
+### Auth and rules
 
-The cursor is what makes it cheap: each poll reads only events newer than the last one, so cost is
-proportional to what was recorded, not to how long the page stayed open.
+Firebase Auth is optional and gated by one env signal that drives both
+[auth-server.ts](src/lib/auth-server.ts) and [firebase-client.ts](src/lib/firebase-client.ts),
+so the two can never disagree about whether a request should have carried a token. Flows
+saved with auth off carry `uid: "local"` and stay readable — enabling auth must not look
+like data loss. Someone else's flow id returns **404, not 403**: it should not be
+confirmable as existing.
 
-**When to switch to `onSnapshot`.** Once the dashboard has real user auth (so rules can scope reads
-to a project) or once multiple people watch the same session — at that point the subscription is
-both cheaper and genuinely push-based. `usePoll` is the only thing that changes.
+[firestore.rules](firestore.rules) is **deny-all**, and that is the correct rule, not a
+placeholder. The client SDK is loaded for auth only; every read and write goes through the
+API routes on the Admin SDK, which bypasses rules entirely. This matters because enabling
+auth publishes the project id into the browser bundle — harmless on its own, but with
+"test mode" rules still in place it is enough to read every recording straight from the
+REST API, and recordings contain full URLs (session tokens in query strings), typed form
+values and uploaded file bytes.
+
+### The bridge is a trust boundary
+
+[bridge.ts](extension/src/content/bridge.ts) runs **only** on origins listed in the
+manifest, and relays `window.postMessage` ↔ a `chrome.runtime` port. That is how the
+dashboard talks to the extension without knowing its id — no `externally_connectable`, no
+hardcoded extension ID. The consequence to be aware of: **any page on a listed origin can
+drive the extension.** The listed origins are `http://localhost:3000` and the Vercel
+deployment, and they appear in **two** places that must stay in step —
+[extension/manifest.json](extension/manifest.json) and the `DASHBOARDS` constant in
+[popup.ts](extension/src/popup/popup.ts). A dashboard on any other origin loads fine and
+simply cannot talk to the extension, which reads as the extension being broken.
+
+### Why not `onSnapshot`
+
+Every Firestore access stays behind the Admin SDK, which is what makes the deny-all rule
+literally true rather than aspirational. The flow page uses a small cursor-free poll
+([usePoll.ts](src/hooks/usePoll.ts)) for the document itself; live *recording* state does
+not come from Firestore at all — it comes over the bridge, push-based already.
 
 ---
 
-## 8. Firestore model
+## 10. Build, run, verify
 
 ```
-projects/{projectId}
-  name, runnerTokenHash, createdAt
-
-sessions/{sessionId}
-  projectId, schemaVersion, targetUrl, name,
-  status: 'queued'|'launching'|'recording'|'stopped'|'error',
-  stopRequested: boolean, claimedBy: runnerId|null, claimedAt,
-  viewport, userAgent, redactSelectors[],
-  createdAt, startedAt, endedAt, eventCount, error?
-  └─ events/{eventId}          ← subcollection: RecordedEvent + serverTs
-
-testcases/{testcaseId}
-  projectId, sourceSessionId, name, description,
-  steps: NormalizedStep[],     ← editable intermediate representation
-  code: string,                ← generated Playwright TS
-  codeEditedManually: boolean, createdAt, updatedAt
-
-runs/{runId}
-  testcaseId, projectId, status: 'queued'|'running'|'passed'|'failed'|'cancelled',
-  driver: 'local'|'container', liveViewUrl, startedAt, finishedAt,
-  summary: { total, passed, failed }, artifacts: { trace?, video?, screenshots[] }
-  └─ logs/{logId}
-
-schedules/{scheduleId}         ← later
-  testcaseId, cron, timezone, enabled, lastRunId, nextRunAt
+npm run dev          # dashboard
+npm run build:ext    # esbuild -> extension/dist  (Load unpacked)
+npm run typecheck    # tsc --noEmit && tsc -p extension
+npm run lint
+npm test             # node --test over src/**/*.test.ts
+npm run flow -- <file>.tfflow.json [--headed] [--speed recorded] [--har-record f] [--secret N=v]
 ```
 
-- Events are a **subcollection**, never an array field — a session blows past the 1MB doc limit fast.
-- `writeBatch` caps at 500 ops; the ingest route chunks at 400 and runner batches are 50.
-- **No composite indexes are required, by design.** Every query is either a single equality filter
-  (`status == 'queued'`, then sorted in memory over ≤10 candidates) or a range + sort on the *same*
-  field (`seq > cursor` ordered by `seq`). Both are served by Firestore's automatic single-field
-  indexes. This is worth preserving: a composite index means a console round-trip and a
-  failed-query error for whoever sets the project up next.
-- **Rules: deny all client access.** With realtime served by polling through API routes (§7),
-  nothing reaches Firestore except the Admin SDK — the deny-all default needs no exceptions.
-- Ids are meaningful: an event's doc id is its own uuid and a log's is `log-<seq>`, so a retried
-  batch overwrites instead of duplicating. Retry safety is a property of the schema, not of
-  the retry logic.
-- Storage: `runs/{runId}/trace.zip`, `video.webm`, `screenshots/*.png`. Short-TTL signed URLs only —
-  the bucket stays private. *(Not yet wired: artifacts currently stay on the runner's disk.)*
+End-to-end suites drive a real Chromium with the real extension loaded
+(`launchPersistentContext` + `--load-extension`), against the fixtures in [public/](public/):
+
+| Script | Proves |
+|---|---|
+| `npm run e2e` | recording — capture, selectors, iframes, popups |
+| `npm run e2e:replay` | in-browser replay through the extension |
+| `npm run e2e:runner` | the Playwright interpreter, including sealed mode |
+| `npm run e2e:cli` | `npm run flow` end to end |
+| `npm run e2e:long` | long-flow performance — the O(n²) regressions have a test |
+| `npm run e2e:anchor` | anchored selectors and the fragile chip |
+
+The fixtures are chosen adversarially: `demo-frames`/`demo-manyframes` for frame identity
+and reordering, `demo-heavy` for selector cost on a large DOM, `demo-csp` for a page whose
+CSP forbids `unsafe-eval`, `demo-anchor` for elements that describe themselves badly — so
+each limitation is a test rather than a support ticket.
+
+**Auth must be off to run the E2E suites.** They drive the dashboard as an anonymous user,
+so the sign-in wall blocks them. Start the dev server with the client Firebase vars
+cleared:
+
+```
+NEXT_PUBLIC_FIREBASE_API_KEY= NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN= \
+NEXT_PUBLIC_FIREBASE_PROJECT_ID= npm run dev
+```
+
+**Node 22 is required** (`engines`, `.nvmrc`) because `firebase-admin@14` demands it. That
+is the *only* reason, and it is explicitly not what fixed the `ERR_REQUIRE_ESM` crash in
+the auth routes — that was `jose`, pinned back to 5.x in `overrides` because Vercel's
+runtime has `require(esm)` disabled rather than missing. `GET /api/health` reports the Node
+version the deployment actually got, plus whether `firebase-admin/auth` loaded.
 
 ---
 
-## 9. Events → Playwright
+## 11. Boundaries, as designed
 
-Deterministic transform, not an LLM: reproducible, debuggable, no API dependency. An optional
-"clean up with AI" pass on top is a fine later addition — the baseline must not need it.
+Things this system does not do, stated so nobody discovers them at 2 a.m.:
 
-**Normalize** (`codegen/normalize.ts`), in order:
-
-1. Drop `scroll` events — Playwright auto-scrolls into view; recorded scrolls are noise.
-2. Collapse a run of `input` on the same target into one `fill(finalValue)`.
-3. Drop a `click` immediately followed by `input` on that same element (focus click).
-4. Collapse `click` on `<label>` + the resulting control click into one.
-5. First `navigate` → `page.goto(url)`. Later ones → `expect(page).toHaveURL(…)` (the click caused it).
-6. Drop `press` events that already produced a `submit`.
-7. `newtab` → `const [popup] = await Promise.all([context.waitForEvent('page'), …click])`, and
-   subsequent events on that `pageId` retarget to `popup`.
-8. `dialog` → emit a `page.on('dialog', d => d.accept())` handler **before** the triggering step.
-9. Insert `expect(locator).toBeVisible()` before the first interaction on each new URL as a cheap
-   implicit wait. Never emit `waitForTimeout`.
-10. `assert` events map straight to `expect(...)`.
-
-Output is `NormalizedStep[]`, stored on the test case so the UI can render an editable step list
-independent of the code text.
-
-**Select**: highest-scoring `unique` candidate per step; if none is unique, best CSS path marked
-`brittle` so the UI can flag it.
-
-**Emit**: steps → TS → Prettier.
-
-```ts
-import { test, expect } from '@playwright/test';
-
-test('checkout — guest user', async ({ page }) => {
-  await page.setViewportSize({ width: 1512, height: 856 });
-  await page.goto('https://example.com/products');
-
-  await page.getByRole('button', { name: 'Add to cart' }).click();
-  await page.getByTestId('cart-icon').click();
-  await expect(page).toHaveURL(/\/cart/);
-
-  await page.getByLabel('Email').fill('test@example.com');
-  await page.getByLabel('Password').fill(process.env.TEST_PASSWORD!);
-  await page.getByRole('button', { name: 'Continue' }).click();
-
-  await expect(page.getByText('Order confirmed')).toBeVisible();
-});
-```
-
-Step list and code render side by side. Editing a step regenerates the code; editing code directly
-sets `codeEditedManually: true` so regeneration stops clobbering it.
+| Limit | Why |
+|---|---|
+| No authored assertions | The recorder captures what happened; it has no UI for "assert this". The single biggest product gap — see [UPGRADE.md](UPGRADE.md) §C1. |
+| Flows are immutable after save | `PATCH` renames. Nothing else. |
+| Nothing remembers pass/fail | Runs are ephemeral; there is no run history collection. |
+| No unattended execution | `npm run flow` is manual. Scheduling would be additive. |
+| One session at a time | By design — `startSession` stops any existing one. |
+| File uploads cannot replay in-browser | An isolated world cannot put bytes into a page's file input. Playwright can. |
+| Passwords cannot replay in-browser | No value was captured, and there is nowhere safe to keep one in an extension. |
+| Scrollbar-drag scrolls are not captured | They produce no wheel/touch/key input, so the user-intent gate cannot see them. |
+| Closed shadow roots are unreachable | Invisible to everything outside them. Reported as a hint, not worked around. |
+| Native drags replay only with a real driver | Chrome's drag machinery starts for real input only; synthetic replay moves a cursor and drops nothing. |
+| Any page on a bridge origin can drive the extension | See §9. |
 
 ---
 
-## 10. Playback
+## 12. Lineage — why an extension
 
-Same runner, second mode — `replay.ts` instead of `record.ts`. Constraints worth stating once:
+Kept because the constraint still shapes everything, not for historical interest.
 
-- **Playwright cannot run on Vercel serverless** — binaries and execution time exceed the function
-  limits. That's why the runner exists as its own process, and why `playwright` stays out of the
-  root `package.json`.
-- **You cannot iframe the site under test.** `X-Frame-Options` / `frame-ancestors` blocks most real
-  targets. Any embedded view must show the *browser's* live view — a screencast or VNC surface the
-  runner serves — never the target URL.
-- **An https dashboard cannot reach a `http://localhost` runner** (mixed content). Local runner
-  pairs with a local dashboard; hosted dashboard needs a hosted browser.
+A web page cannot inject into a cross-origin tab. `window.open()` returns a handle the
+same-origin policy forbids you to touch — no flag, header or trick opens it. This is the
+exact wall that makes recorders ship as browser extensions.
 
-Phase 1: playback runs headed in a local window, exactly like recording — the user watches the real
-window, and the dashboard streams step-by-step pass/fail through Firestore. Phase 2: container
-driver returns an https noVNC URL and `LiveView.tsx` embeds it.
+- **v1** launched Playwright with `addInitScript` + `exposeBinding`. It worked, and it
+  required a process outside Vercel for the *recording* path, plus a live-view story to
+  ever be hosted. The event contract was custom.
+- **v2** moved recording into the user's own browser via a snippet/bookmarklet and adopted
+  the **DevTools Recorder format** — the decision that still stands. But bookmarklets die
+  on hard navigations, strict CSP blocks them, cross-origin iframes stay invisible, tabs
+  the dashboard did not open are unreachable, and a dashboard reload lost the recording.
+- **v3 (this)** is an MV3 extension. Every one of those limits disappears at the cost of a
+  one-time "load unpacked" step; the flow format, storage model, flows UI and codegen
+  carried over unchanged.
 
-Afterwards, upload `trace.zip` + `video.webm` to Storage and link them from the run page. The
-Playwright trace viewer is the best failure-debugging surface available and it costs nothing.
-
----
-
-## 11. Hosted sessions (Phase 2)
-
-For recording, hosted is strictly harder than playback, because the user must **interact** with the
-remote browser, not just watch it. That means input forwarding.
-
-- **noVNC** (Docker: `mcr.microsoft.com/playwright` + Xvfb + x11vnc + noVNC on Fly.io / Railway) —
-  bidirectional out of the box, embeds as a plain iframe. Recommended for self-hosting.
-- **Managed** (Browserbase / Steel / Browserless) — hand back an interactive live-view URL built for
-  iframe embedding. Faster to ship, metered per browser-hour.
-- **DIY CDP screencast + `Input.dispatchMouseEvent`** — full control, but you're reimplementing VNC.
-  Only worth it if you need a custom overlay drawn over the live view.
-
-One session driver interface covers all of it:
-
-```ts
-export interface SessionDriver {
-  launch(opts: { url: string; viewport?: Viewport }): Promise<{ liveViewUrl: string | null }>;
-  onEvent(cb: (e: RecordedEvent) => void): void;
-  stop(): Promise<void>;
-}
-```
-
-`LocalDriver` returns `liveViewUrl: null` (the window is right there on the desktop);
-`ContainerDriver` returns a URL. The dashboard renders a live view when there's a URL and a
-"check your browser window" hint when there isn't. That's the only branch in the UI.
-
----
-
-## 12. Environment
-
-`.env.local` (already gitignored):
-
-```
-FIREBASE_PROJECT_ID=
-FIREBASE_CLIENT_EMAIL=
-FIREBASE_PRIVATE_KEY=            # \n-escaped
-FIREBASE_STORAGE_BUCKET=
-NEXT_PUBLIC_FIREBASE_API_KEY=    # client SDK — realtime subscriptions only
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=
-RUNNER_TOKEN=                    # shared secret for /api/runner/*
-```
-
-`runner/.env`:
-
-```
-DASHBOARD_URL=http://localhost:3000
-RUNNER_TOKEN=
-RUNNER_ID=local-1
-BROWSER_PROFILE_DIR=./.profiles   # persistent profile: log in once, reuse the session
-```
-
-A persistent profile dir is a small detail with a big payoff — the user logs into the site under
-test once, and every later recording session starts already authenticated.
-
----
-
-## 13. Later: scheduled testing
-
-Additive, no refactor, provided these hooks exist now:
-
-- `schedules` collection (§8).
-- Vercel Cron → `/api/cron/tick` every 5 min: query `enabled == true and nextRunAt <= now`, enqueue
-  runs, advance `nextRunAt`.
-- Scheduled runs are **headless** — `SessionDriver` already returns `liveViewUrl: null`, so nothing
-  else changes.
-- Failure notifications (email / Slack webhook) read the run summary.
-
----
-
-## 14. Build order
-
-| Milestone | Deliverable | Status |
-|---|---|---|
-| **M0** | Firebase Admin wiring, runner token, `/api/health` | ✅ built |
-| **M1** | Runner skeleton + transactional claim loop | ✅ built |
-| **M2** | Launch + `addInitScript` + `exposeBinding` | ✅ built |
-| **M3** | Selector engine + full DOM capture + masking | ✅ built |
-| **M4** | Ingest route + batching + CDP-level events | ✅ built |
-| **M5** | Start Session UI + live timeline + Stop | ✅ built — **the flow diagram works end to end** |
-| **M6** | Normalizer + codegen + step/code editor | ✅ built — verified by `npm run smoke:codegen` |
-| **M7** | Replay mode + streamed step log | ✅ built; artifact **upload** to Storage still open |
-| **M8** | Container driver + interactive noVNC live view | ⬜ not started |
-| **M9** | Scheduling + notifications | ⬜ not started |
-
-Everything through M7 runs locally today. What M8 buys is the hosted case: recording and
-replaying from a deployed dashboard instead of a browser on your own machine.
-
-Verify with `npm run typecheck`, `npm run lint`, `npm run smoke:codegen`, and
-`npm --prefix runner run typecheck`.
-
----
-
-## 15. Open decisions
-
-- **Dashboard auth** — MVP can be a single shared secret. Firebase Auth (Google sign-in) is the
-  natural upgrade and reuses the Firebase project already in play.
-- **Runner distribution** — `npx testflow-runner` (published package) vs "clone the repo and
-  `npm run runner`". Publishing matters only once someone other than you runs it.
-- **Managed vs self-hosted browser** for Phase 2 — deferred to M8; the `SessionDriver` interface
-  makes it a one-file swap.
-- **Code editor** — CodeMirror 6 (light) vs Monaco (full IntelliSense). CodeMirror is likely right
-  for a read-mostly surface.
+What v3 then added beyond parity — and what this document is mostly about — is the second
+half of the premise in §1: sidecars, environment capture and verification, frame and tab
+identity, real input over CDP, one shared resolver, sealed mode, and a named cause for
+every way a replay can differ from the recording.

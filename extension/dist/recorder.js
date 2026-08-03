@@ -522,6 +522,38 @@
     return void 0;
   }
 
+  // src/shared/selectors.ts
+  function isStableId(id) {
+    if (!id || id.length > 60) return false;
+    if (id.includes(":")) return false;
+    if (/^\d/.test(id)) return false;
+    if (/^(mui|radix|headlessui|ember|react-aria|rc|chakra)[-_]/i.test(id)) return false;
+    if (/^[0-9a-f]{8,}$/i.test(id)) return false;
+    if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/i.test(id)) return false;
+    return true;
+  }
+  function isStableClass(name) {
+    if (!name || name.length > 50) return false;
+    if (/^(css|sc|emotion|jsx|styled)-/.test(name)) return false;
+    if (/^[0-9a-f]{6,}$/i.test(name)) return false;
+    if (/__[a-z0-9]{4,}$/i.test(name)) return false;
+    return true;
+  }
+  function isDurableToken(token) {
+    if (/\[(data-|aria-label|name=|placeholder=)/.test(token)) return true;
+    const id = /^#((?:[^\s>~+\\]|\\.)+)/.exec(token)?.[1];
+    return id ? isStableId(id.replace(/\\(.)/g, "$1")) : false;
+  }
+  function hasDurableRoot(selector) {
+    if (selector.startsWith("aria/") || selector.startsWith("text/")) return true;
+    if (selector.startsWith("xpath/") || selector.startsWith("pierce/")) return false;
+    if (selector.includes(":has(")) return isDurableToken(selector);
+    return isDurableToken(selector.split(/\s*[>~+]\s*|\s+/, 1)[0] ?? "");
+  }
+  function isPositionalOnly(selectors) {
+    return !selectors.some((group) => hasDurableRoot(group[0] ?? ""));
+  }
+
   // extension/src/content/recorder.ts
   var CURSOR_GLIDE_MS = 420;
   var mode = "off";
@@ -574,7 +606,7 @@
     const path = [];
     let node = el;
     while (node && node.nodeType === 1) {
-      if (node.id) {
+      if (node.id && isStableId(node.id)) {
         path.push({ tag: node.tagName.toLowerCase(), nth: 0, id: node.id });
         break;
       }
@@ -584,14 +616,16 @@
     return path;
   }
   function cssFrom(el, path) {
-    if (el.classList.length > 0) {
-      const classes = Array.from(el.classList).slice(0, 3).map(cssEsc);
-      const short = `${el.tagName.toLowerCase()}.${classes.join(".")}`;
-      if (resolvesTo(short, el)) return short;
-    }
-    if (el.id) {
+    if (el.id && isStableId(el.id)) {
       const byId = `#${cssEsc(el.id)}`;
       if (resolvesTo(byId, el)) return byId;
+    }
+    if (el.classList.length > 0) {
+      const classes = Array.from(el.classList).filter(isStableClass).slice(0, 3).map(cssEsc);
+      if (classes.length > 0) {
+        const short = `${el.tagName.toLowerCase()}.${classes.join(".")}`;
+        if (resolvesTo(short, el)) return short;
+      }
     }
     const parts = [];
     for (const node of path) {
@@ -625,6 +659,88 @@
     }
   }
   var TESTID_ATTRS = ["data-testid", "data-test", "data-test-id", "data-cy", "data-qa"];
+  var ANCHOR_MAX_HOPS = 8;
+  var HAS_MAX_CANDIDATES = 4;
+  var HAS_MAX_SCAN = 20;
+  function durableHandle(el) {
+    for (const attr of TESTID_ATTRS) {
+      const value = el.getAttribute(attr);
+      if (value) {
+        const selector = `[${attr}="${attrEsc(value)}"]`;
+        return resolvesTo(selector, el) ? selector : null;
+      }
+    }
+    if (el.id && isStableId(el.id)) {
+      const selector = `#${cssEsc(el.id)}`;
+      if (resolvesTo(selector, el)) return selector;
+    }
+    const label = el.getAttribute("aria-label");
+    if (label) {
+      const selector = `[aria-label="${attrEsc(label)}"]`;
+      if (resolvesTo(selector, el)) return selector;
+    }
+    const tag = el.tagName.toLowerCase();
+    const nameAttr = el.getAttribute("name");
+    if (nameAttr && (tag === "input" || tag === "select" || tag === "textarea" || tag === "button")) {
+      const selector = `${tag}[name="${attrEsc(nameAttr)}"]`;
+      if (resolvesTo(selector, el)) return selector;
+    }
+    return null;
+  }
+  function anchorHandle(el) {
+    const strong = durableHandle(el);
+    if (strong) return strong;
+    if (el.classList.length > 0) {
+      const classes = Array.from(el.classList).filter(isStableClass).slice(0, 3).map(cssEsc);
+      if (classes.length > 0) {
+        const selector = `${el.tagName.toLowerCase()}.${classes.join(".")}`;
+        if (resolvesTo(selector, el)) return selector;
+      }
+    }
+    return null;
+  }
+  function stepFor(node) {
+    const tag = node.tagName.toLowerCase();
+    const nth = nthOfType(node);
+    return nth > 0 ? `${tag}:nth-of-type(${nth})` : tag;
+  }
+  function anchoredPaths(el) {
+    const steps = [];
+    const self = stepFor(el);
+    let node = el.parentElement;
+    for (let hop = 0; node && hop < ANCHOR_MAX_HOPS; hop++) {
+      const tag = node.tagName.toLowerCase();
+      if (tag === "body" || tag === "html") break;
+      const handle = anchorHandle(node);
+      if (handle) {
+        const strict = [handle, ...steps, self].join(" > ");
+        const loose = `${handle} ${self}`;
+        return strict === loose ? [strict] : [strict, loose];
+      }
+      steps.unshift(stepFor(node));
+      node = node.parentElement;
+    }
+    return [];
+  }
+  function containsPaths(el) {
+    const out = [];
+    const tag = el.tagName.toLowerCase();
+    let scanned = 0;
+    for (const child of el.children) {
+      if (scanned++ >= HAS_MAX_SCAN || out.length >= HAS_MAX_CANDIDATES) break;
+      const handle = anchorHandle(child);
+      if (handle) out.push(`${tag}:has(> ${handle})`);
+    }
+    if (out.length < HAS_MAX_CANDIDATES) {
+      for (const attr of ["data-testid", "aria-label"]) {
+        const inner = el.querySelector(`[${attr}]`);
+        if (!inner) continue;
+        const handle = durableHandle(inner);
+        if (handle) out.push(`${tag}:has(${handle})`);
+      }
+    }
+    return out;
+  }
   var selectorMs = 0;
   var SLOW_STEP_MS = 120;
   function selectorsFor(el) {
@@ -669,6 +785,10 @@
     if (el.childElementCount === 0) {
       const text = norm(el.textContent);
       if (text && text.length <= 60) out.push([`text/${text.slice(0, 25)}`]);
+    }
+    if (isPositionalOnly(out)) {
+      for (const selector of anchoredPaths(el)) push(selector);
+      for (const selector of containsPaths(el)) push(selector);
     }
     return out;
   }
@@ -731,12 +851,6 @@
       });
     }
     return out;
-  }
-  function isPositionalOnly(selectors) {
-    return selectors.every((group) => {
-      const selector = group[0] ?? "";
-      return !selector.startsWith("aria/") && !selector.startsWith("text/") && !selector.startsWith("[data-") && !selector.includes("[name=") && !selector.includes("[placeholder=");
-    });
   }
   function record(step, el, extra) {
     stepCount++;
