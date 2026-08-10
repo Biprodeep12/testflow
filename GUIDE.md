@@ -171,6 +171,15 @@ You watch it happen. Steps light up green or red as they go, and a pointer glide
 each target before it clicks, so you can see where the run is. Untick **Cursor** to
 turn that off — it costs a moment per step.
 
+**Route waits.** A flow that moved between SPA routes carries a `waitForExpression`
+step per route change, asserting `location.pathname + location.hash`. Untick **Route
+waits** if the route legitimately differs every run — a session id in the path, an
+A/B redirect. Those steps then report **skipped**, never passed: the run no longer
+proves the flow reached the recorded route, and it says so rather than going quiet.
+The toggle only appears on flows that have one, and it only touches the recorder's
+own location assertions — a hand-written expression in an imported DevTools flow
+still runs.
+
 **In Playwright** — from the terminal:
 
 ```bash
@@ -186,6 +195,7 @@ Useful flags:
 --har-record traffic.har      # save all network traffic
 --har-replay traffic.har      # replay against saved traffic (sealed mode)
 --continue                    # don't stop at the first failure
+--no-route-waits              # skip the SPA route assertions (reported skipped)
 ```
 
 Exits `0` if everything passed, `1` if not — so it drops into CI as-is.

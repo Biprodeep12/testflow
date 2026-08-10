@@ -18,6 +18,7 @@ import { FlowStepList, type StepStatus } from "@/components/FlowStepList";
 import { apiFetch, del, relativeTime } from "@/lib/client";
 import { usePoll } from "@/hooks/usePoll";
 import { flowToPlaywright } from "@/codegen/fromFlow";
+import { isRouteExpression } from "@/shared/expressions";
 import {
   BUNDLE_EXTENSION,
   DEFAULT_TIMEOUT_MS,
@@ -70,6 +71,10 @@ export default function FlowPage() {
   // A visible pointer that glides to each target before the click. Costs a little
   // time per step, which is why it can be turned off.
   const [showCursor, setShowCursor] = useState(true);
+  // The SPA route assertions the recorder writes as waitForExpression. On by
+  // default — they are the only thing proving a pushState navigation happened —
+  // but a flow whose route legitimately differs per run can turn them off.
+  const [routeWaits, setRouteWaits] = useState(true);
   const [statuses, setStatuses] = useState<StepStatus[]>([]);
   const [stepErrors, setStepErrors] = useState<(string | undefined)[]>([]);
   // Steps that ran, but not as recorded — e.g. synthetic events because real input
@@ -193,7 +198,7 @@ export default function FlowPage() {
         env: flow.env,
         meta: flow.meta,
       },
-      options: { speed, cursor: showCursor },
+      options: { speed, cursor: showCursor, routeWaits },
     });
 
     if (connectTimer.current) clearTimeout(connectTimer.current);
@@ -283,6 +288,9 @@ export default function FlowPage() {
   }
 
   const busy = runState === "running" || runState === "connecting";
+  const hasRouteWaits = flow.steps.some(
+    (s) => s.type === "waitForExpression" && isRouteExpression(s.expression),
+  );
   const passed = statuses.filter((s) => s === "pass").length;
   const failed = statuses.filter((s) => s === "fail").length;
   const skipped = statuses.filter((s) => s === "skipped").length;
@@ -419,6 +427,17 @@ export default function FlowPage() {
               label="Cursor"
               title="Glides a visible pointer to each target before acting. Adds a moment per step."
             />
+            {/* Only shown when the flow actually has one — a control that can
+                never change the outcome is noise in a bar this small. */}
+            {hasRouteWaits && (
+              <Toggle
+                checked={routeWaits}
+                onChange={setRouteWaits}
+                disabled={busy}
+                label="Route waits"
+                title="SPA route changes are recorded as waitForExpression assertions on location.pathname + location.hash. Off skips them — they report as skipped, never as passed, so the run no longer proves the flow reached the recorded route."
+              />
+            )}
             <span className="flex-1" />
             {busy ? (
               <Button variant="danger" onClick={stopRun}>

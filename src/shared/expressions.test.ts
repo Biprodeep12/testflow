@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { evaluateKnownExpression, isKnownExpression } from "./expressions";
+import { evaluateKnownExpression, isRouteExpression } from "./expressions";
 
 const at = (pathname: string, hash = "", href = "https://x.test/") =>
   (kind: "pathname" | "hash" | "href") =>
@@ -73,9 +73,32 @@ describe("evaluateKnownExpression", () => {
   });
 });
 
-describe("isKnownExpression", () => {
+describe("isRouteExpression", () => {
   it("recognises exactly the forms the recorder writes", () => {
-    assert.equal(isKnownExpression(`location.pathname + location.hash === "/a"`), true);
-    assert.equal(isKnownExpression(`alert(1)`), false);
+    assert.equal(isRouteExpression(`location.pathname + location.hash === "/a"`), true);
+    assert.equal(isRouteExpression(`location.pathname === "/a"`), true);
+    assert.equal(isRouteExpression(`location.href === "https://x.test/a"`), true);
+    assert.equal(isRouteExpression(`  location.pathname === "/a"  `), true);
+    assert.equal(isRouteExpression(`alert(1)`), false);
+  });
+
+  /**
+   * The "Route waits" option skips on this predicate, so a false positive silently
+   * drops the assertion an imported flow exists to make.
+   */
+  it("does not claim a hand-written expression as a route assertion", () => {
+    for (const expression of [
+      `document.getElementById('x').textContent === 'y'`,
+      `window.dataLayer.length > 0`,
+      `location.pathname !== "/a"`,
+      `location.pathname + location.search === "/a"`,
+    ]) {
+      assert.equal(isRouteExpression(expression), false, `matched: ${expression}`);
+    }
+  });
+
+  it("is false for a step carrying no expression at all", () => {
+    assert.equal(isRouteExpression(undefined), false);
+    assert.equal(isRouteExpression(""), false);
   });
 });

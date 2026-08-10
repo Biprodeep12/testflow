@@ -420,6 +420,17 @@ export type RunOptions = {
   speed: "fast" | "recorded";
   /** glide a visible cursor to each target before acting */
   cursor: boolean;
+  /**
+   * Run the `waitForExpression` steps — in a TestFlow recording these are the SPA
+   * route assertions (`location.pathname + location.hash === "…"`). Off skips them,
+   * reported as `skipped` so a run that no longer visits the recorded route cannot
+   * pass by omission. For flows whose route is legitimately different every run
+   * (a session id in the path, an A/B redirect), or an imported DevTools flow with
+   * an expression this browser can't satisfy.
+   *
+   * Optional so an older dashboard, which sends neither field, still runs them.
+   */
+  routeWaits?: boolean;
 };
 
 /** One step's state in a service-worker-driven run. */

@@ -6,6 +6,7 @@
  *   npm run flow -- my-recording.tfflow.json --har-record run.har
  *   npm run flow -- my-recording.tfflow.json --har-replay run.har
  *   npm run flow -- my-recording.tfflow.json --secret LOGIN_PASSWORD=hunter2
+ *   npm run flow -- my-recording.tfflow.json --no-route-waits
  *
  * The input is a "bundle" (Download bundle in the dashboard) — the DevTools steps
  * plus the sidecars. A plain DevTools export works too; it just replays without the
@@ -26,7 +27,8 @@ function parseArgs(argv: string[]): { file: string; options: RunOptions } {
     console.error(
       "usage: npm run flow -- <flow.tfflow.json> [--headed] [--speed fast|recorded]\n" +
         "                      [--har-record <file>] [--har-replay <file>]\n" +
-        "                      [--secret NAME=value] [--timeout ms] [--continue]",
+        "                      [--secret NAME=value] [--timeout ms] [--continue]\n" +
+        "                      [--no-route-waits]",
     );
     process.exit(2);
   }
@@ -53,6 +55,11 @@ function parseArgs(argv: string[]): { file: string; options: RunOptions } {
         break;
       case "--continue":
         options.continueOnError = true;
+        break;
+      case "--no-route-waits":
+        // The SPA route assertions the recorder writes as waitForExpression. Off
+        // reports them skipped — for flows whose route differs every run.
+        options.routeWaits = false;
         break;
       case "--channel":
         options.channel = value;
@@ -125,9 +132,10 @@ function print(report: RunReport): void {
 
   const passed = report.steps.filter((s) => s.status === "pass").length;
   const failed = report.steps.filter((s) => s.status === "fail").length;
+  const skipped = report.steps.filter((s) => s.status === "skipped").length;
   console.log(
     `\n${report.ok ? "PASS" : "FAIL"} — ${passed} passed, ${failed} failed, ` +
-      `${report.durationMs}ms`,
+      `${skipped} skipped, ${report.durationMs}ms`,
   );
   if (report.blockedBy) {
     console.log(

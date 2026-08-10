@@ -58,7 +58,18 @@ export function evaluateKnownExpression(
   return undefined;
 }
 
-/** Is this an expression we can answer without an evaluator? */
-export function isKnownExpression(expression: string): boolean {
-  return FORMS.some((form) => form.pattern.test(expression.trim()));
+/**
+ * Is this one of the recorder's own route assertions?
+ *
+ * Two callers, same question. Under a CSP it means "answerable without an
+ * evaluator"; for the "Route waits" run option it means "this step exists only
+ * because an SPA changed `location`, so turning route waits off may skip it".
+ * Deliberately narrower than `type === "waitForExpression"` — a flow imported from
+ * DevTools can carry a hand-written expression that is the point of the test, and
+ * that one is never dropped.
+ */
+export function isRouteExpression(expression: string | undefined): boolean {
+  if (!expression) return false;
+  const trimmed = expression.trim();
+  return FORMS.some((form) => form.pattern.test(trimmed));
 }

@@ -25,6 +25,7 @@ import {
 } from "../types/flow";
 import { installDeterminism } from "./determinism";
 import { pageExpr } from "../shared/resolve";
+import { isRouteExpression } from "../shared/expressions";
 import { contextOptionsFrom, launchOptionsFrom, pinClock, verifyEnv } from "./env";
 import { frameFor, resolveHandle, restoreScroll, type FrameHow } from "./locate";
 import {
@@ -434,6 +435,7 @@ export async function runFlow(flow: FlowJson, options: RunOptions = {}): Promise
     speed: options.speed ?? "fast",
     timeout: options.timeout ?? flow.timeout ?? DEFAULT_TIMEOUT_MS,
     clock: options.clock ?? ("recorded" as const),
+    routeWaits: options.routeWaits ?? true,
   };
 
   const browser: Browser =
@@ -574,6 +576,26 @@ export async function runFlow(flow: FlowJson, options: RunOptions = {}): Promise
           status: "skipped",
           targetId: meta.targetId,
           durationMs: Date.now() - began,
+        });
+        continue;
+      }
+
+      // Route waits turned off. Only the recorder's OWN location assertions — a
+      // hand-written expression in an imported flow is the point of that flow.
+      // Skipped rather than passed: the report must not claim the flow reached the
+      // recorded route when nothing checked.
+      if (
+        step.type === "waitForExpression" &&
+        !opts.routeWaits &&
+        isRouteExpression(step.expression)
+      ) {
+        results.push({
+          index,
+          type: step.type,
+          status: "skipped",
+          targetId: meta.targetId,
+          durationMs: Date.now() - began,
+          notes: ["route waits are off — the expression was not evaluated"],
         });
         continue;
       }

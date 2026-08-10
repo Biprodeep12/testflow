@@ -28,6 +28,7 @@ import {
   type TabMode,
   type TargetId,
 } from "../shared/flow";
+import { isRouteExpression } from "../../../src/shared/expressions";
 import * as cdp from "./cdp";
 
 /** A frame that has announced itself, and where to reach it. */
@@ -1086,7 +1087,15 @@ async function runReplayLoop(runId: number): Promise<void> {
     // the timeline, so skipping them keeps the first real deadline honest.)
     if (
       step.type === "setViewport" ||
-      (step.type === "navigate" && step.url === nav?.url && i <= 1)
+      (step.type === "navigate" && step.url === nav?.url && i <= 1) ||
+      // Route waits turned off. Only the recorder's OWN location assertions — a
+      // hand-written expression in an imported flow is the point of that flow and
+      // is never dropped. Skipped, never passed: the run no longer proves the flow
+      // reached the recorded route. The stamp stays in the timeline, so the pacing
+      // of everything after it is unchanged.
+      (step.type === "waitForExpression" &&
+        options.routeWaits === false &&
+        isRouteExpression(step.expression))
     ) {
       if (!(await reportStep(runId, i, "skipped"))) return;
       continue;

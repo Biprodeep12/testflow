@@ -25,6 +25,27 @@
   }
   var DEFAULT_TIMEOUT_MS = 5e3;
 
+  // src/shared/expressions.ts
+  var FORMS = [
+    {
+      pattern: /^location\.pathname \+ location\.hash === ("(?:[^"\\]|\\.)*")$/,
+      actual: () => location.pathname + location.hash
+    },
+    {
+      pattern: /^location\.pathname === ("(?:[^"\\]|\\.)*")$/,
+      actual: () => location.pathname
+    },
+    {
+      pattern: /^location\.href === ("(?:[^"\\]|\\.)*")$/,
+      actual: () => location.href
+    }
+  ];
+  function isRouteExpression(expression) {
+    if (!expression) return false;
+    const trimmed = expression.trim();
+    return FORMS.some((form) => form.pattern.test(trimmed));
+  }
+
   // extension/src/sw/cdp.ts
   var PROTOCOL_VERSION = "1.3";
   var attached = /* @__PURE__ */ new Set();
@@ -791,7 +812,12 @@
     for (let i = run.index; i < steps.length; i++) {
       const step = steps[i];
       const meta = metaAt(i);
-      if (step.type === "setViewport" || step.type === "navigate" && step.url === nav?.url && i <= 1) {
+      if (step.type === "setViewport" || step.type === "navigate" && step.url === nav?.url && i <= 1 || // Route waits turned off. Only the recorder's OWN location assertions — a
+      // hand-written expression in an imported flow is the point of that flow and
+      // is never dropped. Skipped, never passed: the run no longer proves the flow
+      // reached the recorded route. The stamp stays in the timeline, so the pacing
+      // of everything after it is unchanged.
+      step.type === "waitForExpression" && options.routeWaits === false && isRouteExpression(step.expression)) {
         if (!await reportStep(runId, i, "skipped")) return;
         continue;
       }

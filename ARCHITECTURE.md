@@ -246,6 +246,15 @@ both replay engines already know how to execute it, and the wait is tied to page
 instead of a sleep. Query strings are dropped — they carry session tokens and
 cache-busters that differ every run.
 
+The path is not always stable either, though, and no rewriting rule covers a session
+id or an A/B redirect. So the assertion is a **run option** rather than a recording
+decision: `routeWaits` (the "Route waits" toggle, `--no-route-waits` in the CLI)
+reports these steps as `skipped` instead of running them. Skipped, never passed —
+the run stops proving the flow reached the recorded route, and the report has to say
+so. Both engines gate on [`isRouteExpression`](src/shared/expressions.ts), not on the
+step type, so a hand-written expression in an imported DevTools flow is never
+dropped by a toggle that was only ever about routes.
+
 ### 4.4 The sidecar
 
 Per step, from [recorder.ts](extension/src/content/recorder.ts) `record()`:

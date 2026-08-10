@@ -106,6 +106,12 @@ export type RunOptions = {
   clock?: "recorded" | "off";
   /** keep going after a failed step instead of stopping at the first one */
   continueOnError?: boolean;
+  /**
+   * Run the `waitForExpression` steps — in a TestFlow recording, the SPA route
+   * assertions on `location`. Defaults to true; false reports them as `skipped`,
+   * never as passed, so a run that never reached the recorded route still says so.
+   */
+  routeWaits?: boolean;
   /** reuse a browser instead of launching one (tests) */
   reuseBrowser?: import("playwright").Browser;
   /**
